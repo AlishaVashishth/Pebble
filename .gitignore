@@ -6,3 +6,5 @@ __pycache__/
 media/
 *.pyc
 .pytest_cache/
+
+.env
