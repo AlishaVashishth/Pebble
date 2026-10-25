@@ -1,0 +1,6 @@
+openai
+python-dotenv
+pydantic>=2
+azure-cognitiveservices-speech
+manim
+pytest
