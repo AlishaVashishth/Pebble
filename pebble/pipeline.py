@@ -64,6 +64,22 @@ def write_targets(workspace: JobWorkspace, audio: list[SceneAudio]) -> Path:
     return workspace.targets_path
 
 
+def check_fallback_budget(rendered: list[SceneRender]) -> list[str]:
+    """Names of the scenes that needed a fallback card.
+
+    A couple of fallbacks keep the job alive; losing more than half of the
+    scenes means the generated script is not really explaining anything, so
+    that is a hard failure.
+    """
+    fallbacks = [item.class_name for item in rendered if item.used_fallback]
+    if fallbacks and len(fallbacks) * 2 > len(rendered):
+        raise PebbleError(
+            f"too many scenes failed to render: {len(fallbacks)} of {len(rendered)} "
+            "scenes used a fallback title card"
+        )
+    return fallbacks
+
+
 def _notify(callback: StageCallback | None, stage: str) -> None:
     if callback is not None:
         callback(stage)
@@ -120,6 +136,10 @@ def run_pipeline(
     workspace = JobWorkspace(job_id)
     setup_logging(workspace=workspace, verbose=verbose, quiet=quiet)
     tracker = cost or CostTracker(settings)
+
+    workspace.request_path.write_text(
+        json.dumps(request.model_dump(), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     style_name, _ = get_style(request.preferences_or_default.explanation_style)
     timings: dict[str, float] = {}
@@ -192,6 +212,8 @@ def run_pipeline(
                 f"scene/audio count mismatch: {len(rendered)} video(s) vs {len(audio)} audio"
             )
 
+        check_fallback_budget(rendered)
+
         muxed: list[Path] = []
         for render, voice in zip(rendered, audio):
             out = workspace.muxed_dir / f"{render.index:02d}_{render.class_name}.mp4"
@@ -218,6 +240,7 @@ def run_pipeline(
 
         repair_attempts = sum(item.repair_attempts for item in rendered)
         repairs_applied = sum(item.repairs_applied for item in rendered)
+        fallback_scenes = [item.class_name for item in rendered if item.used_fallback]
 
         result_doc = {
             "job_id": workspace.job_id,
@@ -251,6 +274,8 @@ def run_pipeline(
             "timings": timings,
             "repair_attempts": repair_attempts,
             "repairs_applied": repairs_applied,
+            "fallback_scenes": fallback_scenes,
+            "generation_warnings": list(result.generation_warnings),
             "pacing": {
                 "hold_seconds": HOLD,
                 "targets": json.loads(workspace.targets_path.read_text(encoding="utf-8")),
@@ -273,6 +298,13 @@ def run_pipeline(
 
         stage_banner(5, len(STAGES), "done")
         _notify(on_status, "done")
+
+        if fallback_scenes:
+            logger.warning(
+                "%d scene(s) used a fallback title card: %s",
+                len(fallback_scenes),
+                ", ".join(fallback_scenes),
+            )
 
         size = workspace.final_video_path.stat().st_size
         logger.info(

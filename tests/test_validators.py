@@ -427,48 +427,77 @@ PANEL_META = {
 }
 
 
-def test_compare_panel_scene_with_panel_anchors_is_accepted(env_info, verified_request):
+CORRECTED_META = {
+    **{key: value for key, value in PANEL_META.items()},
+    "solution_source": "corrected",
+    "validation": {"performed": True, "is_correct": False, "issues": [], "notes": ""},
+}
+
+
+@pytest.fixture
+def corrected_request() -> VideoRequest:
+    """An unverified solution the model had to fix: compare_panels is allowed."""
+    from tests.conftest import load_sample
+
+    return load_sample("buggy_two_sum.json")
+
+
+def test_compare_panel_scene_with_panel_anchors_is_accepted(
+    env_info, corrected_request
+):
+    response = make_response(
+        manim_code=_with_panel_scene(), meta=_meta(**CORRECTED_META)
+    )
+    assert _problems(response, corrected_request, env_info) == []
+
+
+def test_compare_panels_without_a_bug_is_only_a_warning(env_info, verified_request):
+    """The rule is soft: it is reported but never blocks a working script."""
+    from pebble.validators import validate_generation_split
+
     response = make_response(manim_code=_with_panel_scene(), meta=_meta(**PANEL_META))
-    assert _problems(response, verified_request, env_info) == []
+    problems = validate_generation_split(parse_response(response), verified_request, env_info)
+    assert problems.hard == []
+    assert any("compare_panels" in problem for problem in problems.soft)
 
 
-def test_lane_anchor_inside_a_compare_scene_is_rejected(env_info, verified_request):
+def test_lane_anchor_inside_a_compare_scene_is_rejected(env_info, corrected_request):
     body = PANEL_SCENE.replace(
         "        right = ArrayViz([3, 2, 4], at=right_at, max_width=5.2)",
         "        right = MapViz(\"seen\", at=RIGHT_LANE, max_width=5.2)",
     )
     problems = _problems(
-        make_response(manim_code=_with_panel_scene(body), meta=_meta(**PANEL_META)),
-        verified_request,
+        make_response(manim_code=_with_panel_scene(body), meta=_meta(**CORRECTED_META)),
+        corrected_request,
         env_info,
     )
     assert any("compare_panels together with" in problem for problem in problems), problems
 
 
 def test_structure_without_a_panel_anchor_in_a_compare_scene_is_rejected(
-    env_info, verified_request
+    env_info, corrected_request
 ):
     body = PANEL_SCENE.replace(
         "        right = ArrayViz([3, 2, 4], at=right_at, max_width=5.2)",
         "        right = ArrayViz([3, 2, 4])",
     )
     problems = _problems(
-        make_response(manim_code=_with_panel_scene(body), meta=_meta(**PANEL_META)),
-        verified_request,
+        make_response(manim_code=_with_panel_scene(body), meta=_meta(**CORRECTED_META)),
+        corrected_request,
         env_info,
     )
     assert any("needs at=left_at or at=right_at" in problem for problem in problems), problems
 
 
-def test_state_panel_does_not_need_a_panel_anchor(env_info, verified_request):
+def test_state_panel_does_not_need_a_panel_anchor(env_info, corrected_request):
     body = PANEL_SCENE.replace(
         "        self.play(wrong.intro(), right.intro())",
         "        chips = StatePanel({\"need\": 7})\n"
         "        self.play(wrong.intro(), right.intro(), chips.intro())",
     )
     problems = _problems(
-        make_response(manim_code=_with_panel_scene(body), meta=_meta(**PANEL_META)),
-        verified_request,
+        make_response(manim_code=_with_panel_scene(body), meta=_meta(**CORRECTED_META)),
+        corrected_request,
         env_info,
     )
     assert not any("needs at=left_at" in problem for problem in problems), problems

@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from pebble.config import Settings
 from pebble.environment import EnvInfo
 from pebble.models import VideoRequest
@@ -146,3 +148,46 @@ def test_pipeline_produces_a_finished_video(monkeypatch, tmp_path):
     assert render_script.splitlines()[1:] == (workspace / "animation.py").read_text(
         encoding="utf-8"
     ).splitlines()[1:]
+
+
+# ---------------------------------------------------------------------------
+# render fail-safe budget
+# ---------------------------------------------------------------------------
+
+
+def _scene_render(index: int, name: str, fallback: bool = False):
+    from pebble.renderer import SceneRender
+
+    return SceneRender(
+        index=index,
+        class_name=name,
+        video_path=Path(f"/tmp/{name}.mp4"),
+        duration=1.0,
+        used_fallback=fallback,
+    )
+
+
+def test_one_fallback_scene_keeps_the_job_alive():
+    from pebble.pipeline import check_fallback_budget
+
+    rendered = [
+        _scene_render(1, "Scene1_Intro"),
+        _scene_render(2, "Scene2_Trace", fallback=True),
+        _scene_render(3, "Scene3_Result"),
+    ]
+    assert check_fallback_budget(rendered) == ["Scene2_Trace"]
+
+
+def test_too_many_fallback_scenes_fail_the_job():
+    from pebble.errors import PebbleError
+    from pebble.pipeline import check_fallback_budget
+
+    rendered = [
+        _scene_render(1, "Scene1_Intro", fallback=True),
+        _scene_render(2, "Scene2_Trace", fallback=True),
+        _scene_render(3, "Scene3_Result"),
+    ]
+
+    with pytest.raises(PebbleError) as excinfo:
+        check_fallback_budget(rendered)
+    assert "too many scenes failed to render" in str(excinfo.value)

@@ -8,7 +8,12 @@ from pebble.config import Settings
 from pebble.environment import EnvInfo
 from pebble.errors import RenderError
 from pebble.models import GenerationMeta, GenerationResult
-from pebble.renderer import render_scenes, strip_markdown_fences
+from pebble.renderer import (
+    RenderAttempt,
+    SceneRenderer,
+    render_scenes,
+    strip_markdown_fences,
+)
 from pebble.workspace import JobWorkspace
 from tests.conftest import llm_reply
 
@@ -92,8 +97,8 @@ def _result(class_names: list[str]) -> GenerationResult:
     return GenerationResult(meta=meta)
 
 
-def _settings(retries: int = 0) -> Settings:
-    return Settings(render_quality="l", max_render_retries=retries)
+def _settings(retries: int = 0, audit_mode: str = "strict") -> Settings:
+    return Settings(render_quality="l", max_render_retries=retries, audit_mode=audit_mode)
 
 
 def test_renders_a_tiny_scene():
@@ -140,20 +145,57 @@ def test_repair_loop_fixes_a_failing_scene():
     assert "class Scene1_Tiny(Scene)" in prompt
 
 
-def test_repair_that_renames_a_class_is_rejected():
+def test_repair_that_renames_a_class_is_rejected_and_the_fallback_renders():
     workspace = _job()
     workspace.animation_path.write_text(BROKEN_SCENE, encoding="utf-8")
     renamed = TINY_SCENE.replace("Scene1_Tiny", "Scene1_TinyFixed")
     client = FakeClient([renamed])
 
+    rendered = render_scenes(
+        _result(["Scene1_Tiny"]), workspace, _settings(retries=1), ENV, client=client
+    )
+
+    # The broken repair is rejected (no backup of it), so the fail-safe title
+    # card replaces the scene and the job still produces a video.
+    assert not (workspace.root / "animation.attempt_1.py").exists()
+    assert rendered[0].used_fallback is True
+    assert rendered[0].video_path.exists()
+    script = workspace.animation_path.read_text(encoding="utf-8")
+    assert "missing_helper_that_does_not_exist" not in script
+    assert "show_title" in script
+
+
+def test_fallback_scene_that_also_fails_still_raises(monkeypatch):
+    workspace = _job()
+    workspace.animation_path.write_text(BROKEN_SCENE, encoding="utf-8")
+    client = FakeClient([])
+
+    def always_fails(self, class_name, strict=None):
+        return RenderAttempt(None, "boom", [], False)
+
+    monkeypatch.setattr(SceneRenderer, "_run_manim", always_fails)
     with pytest.raises(RenderError) as excinfo:
         render_scenes(
-            _result(["Scene1_Tiny"]), workspace, _settings(retries=1), ENV, client=client
+            _result(["Scene1_Tiny"]), workspace, _settings(retries=0), ENV, client=client
         )
+    assert "fallback" in str(excinfo.value)
 
-    assert excinfo.value.scene_class == "Scene1_Tiny"
-    assert not (workspace.root / "animation.attempt_1.py").exists()
-    assert workspace.animation_path.read_text(encoding="utf-8") == BROKEN_SCENE
+
+def test_warn_mode_keeps_a_layout_issue_without_failing():
+    workspace = _job()
+    workspace.animation_path.write_text(OVERLAP_SCENE, encoding="utf-8")
+
+    rendered = render_scenes(
+        _result(["Scene1_Tiny"]),
+        workspace,
+        _settings(retries=1, audit_mode="warn"),
+        ENV,
+        client=FakeClient([]),
+    )
+
+    assert rendered[0].video_path.exists()
+    assert rendered[0].repair_attempts == 0
+    assert rendered[0].layout_issues, "warn mode still records the findings"
 
 
 def test_layout_only_failure_falls_back_to_warn_mode():

@@ -15,6 +15,7 @@ must not lose the whole video.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -60,6 +61,7 @@ class SceneRender:
     repair_attempts: int = 0
     repairs_applied: int = 0
     layout_issues: list[str] = field(default_factory=list)
+    used_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,46 @@ def build_render_script(workspace: JobWorkspace) -> Path:
     return workspace.animation_render_path
 
 
+MAX_CAPTION = 70
+
+
+def build_fallback_script(script: str, class_name: str, title: str) -> str:
+    """Replace one scene class with a kit-only title card.
+
+    Used when a scene cannot be rendered even after the repair budget: keeping
+    the job alive with a plain title card beats losing the whole video. Every
+    other class, and the class name itself, is preserved.
+    """
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return script
+
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ),
+        None,
+    )
+    if target is None or target.end_lineno is None:
+        return script
+
+    heading = " ".join((title or class_name).split()) or class_name
+    caption = heading[:MAX_CAPTION].rstrip()
+    replacement = [
+        f"class {class_name}(Scene):",
+        "    def construct(self):",
+        f"        show_title(self, {heading!r})",
+        f"        set_caption(self, {caption!r})",
+        "        finish_scene(self)",
+    ]
+    lines = script.splitlines()
+    new_lines = lines[: target.lineno - 1] + replacement + lines[target.end_lineno :]
+    return "\n".join(new_lines) + "\n"
+
+
 def read_audit(workspace: JobWorkspace, class_name: str) -> list[str]:
     """Layout issues the kit wrote while finishing this scene (empty if none)."""
     path = workspace.root / AUDIT_DIR / f"{class_name}.json"
@@ -159,7 +201,11 @@ class SceneRenderer:
         return self._client
 
     # -- manim ---------------------------------------------------------
-    def _run_manim(self, class_name: str, strict: bool = True) -> RenderAttempt:
+    def _strict(self) -> bool:
+        """Layout audit mode: warn (default) logs, strict fails the scene."""
+        return getattr(self.settings, "audit_mode", "warn") == "strict"
+
+    def _run_manim(self, class_name: str, strict: bool | None = None) -> RenderAttempt:
         media_dir = self.workspace.media_dir / class_name
         media_dir.mkdir(parents=True, exist_ok=True)
         for stale in media_dir.rglob(f"{class_name}.mp4"):
@@ -181,6 +227,8 @@ class SceneRenderer:
             str(self.workspace.animation_render_path),
             class_name,
         ]
+        if strict is None:
+            strict = self._strict()
         env = dict(os.environ)
         env[STRICT_ENV] = "1" if strict else "0"
 
@@ -314,10 +362,20 @@ class SceneRenderer:
         return path
 
     # -- public --------------------------------------------------------
+    def _use_fallback(self, scene: SceneMeta) -> None:
+        """Swap the failing scene for a kit-only title card in animation.py."""
+        script = self.workspace.animation_path.read_text(encoding="utf-8")
+        fallback = build_fallback_script(script, scene.class_name, scene.title)
+        if fallback == script:  # pragma: no cover - defensive
+            logger.warning("could not build a fallback for %s", scene.class_name)
+            return
+        self.workspace.animation_path.write_text(fallback, encoding="utf-8")
+        build_render_script(self.workspace)
+
     def render_scene(self, scene: SceneMeta, index: int) -> SceneRender:
         expected = self.expected_names
         logger.info("[render %d/%d] %s", index, len(expected), scene.class_name)
-        attempt = self._run_manim(scene.class_name, strict=True)
+        attempt = self._run_manim(scene.class_name)
         attempts = 0
         applied = 0
 
@@ -342,7 +400,9 @@ class SceneRenderer:
             build_render_script(self.workspace)
             applied += 1
             # Only the failing scene is re-rendered; finished scenes are kept.
-            attempt = self._run_manim(scene.class_name, strict=True)
+            attempt = self._run_manim(scene.class_name)
+
+        used_fallback = False
 
         if attempt.output is None and attempt.layout_failed:
             # Layout-only failure: keep the video rather than losing the job.
@@ -355,11 +415,23 @@ class SceneRenderer:
             attempt = self._run_manim(scene.class_name, strict=False)
 
         if attempt.output is None:
+            # Fail-safe: swap in a kit-only title card and render that instead.
+            first_error = attempt.error
+            logger.warning(
+                "[render] %s failed after %d repair attempt(s); using a fallback "
+                "scene for it",
+                scene.class_name,
+                attempts,
+            )
+            self._use_fallback(scene)
+            attempt = self._run_manim(scene.class_name)
+            used_fallback = attempt.output is not None
+
+        if attempt.output is None:
             raise RenderError(
-                f"scene {scene.class_name} failed to render after "
-                f"{attempts} repair attempt(s)",
+                f"scene {scene.class_name} failed to render even as a fallback scene",
                 scene_class=scene.class_name,
-                error_tail=attempt.error,
+                error_tail=attempt.error or first_error,
             )
 
         if attempt.issues:
@@ -381,6 +453,7 @@ class SceneRenderer:
             repair_attempts=attempts,
             repairs_applied=applied,
             layout_issues=list(attempt.issues),
+            used_fallback=used_fallback,
         )
 
 

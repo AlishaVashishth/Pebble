@@ -36,6 +36,16 @@ STYLES: dict[str, str] = {
 DEFAULT_STYLE = BEGINNER_FRIENDLY
 
 
+def supported_styles() -> list[str]:
+    """Canonical style names, in the order they are documented."""
+    return list(STYLES)
+
+
+def is_supported_style(name: str | None) -> bool:
+    """True when the style is one of the known styles (case-insensitive)."""
+    return (name or "").strip().lower() in STYLES
+
+
 def get_style(name: str | None) -> tuple[str, str]:
     """Return (canonical_name, style_text); unknown names fall back with a warning."""
     key = (name or "").strip().lower()

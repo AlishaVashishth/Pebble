@@ -155,3 +155,102 @@ _counter = {"n": 0}
 def next_id() -> str:
     _counter["n"] += 1
     return f"{_counter['n']:06d}"
+
+
+# ---------------------------------------------------------------------------
+# hard vs soft problems (soft never kills a job)
+# ---------------------------------------------------------------------------
+
+SOFT_ONLY_MANIM = VALID_MANIM.replace(
+    'self.set_caption("Each number needs a partner")',
+    'self.set_caption("Each number needs a partner, so we remember every value '
+    'we have already seen")',
+)
+
+SUPER_SOFT_MANIM = SOFT_ONLY_MANIM.replace(
+    "        nums = ArrayViz([value for _, value in trace])\n"
+    "        self.play(nums.intro())\n",
+    "",
+)
+
+
+def test_soft_problems_are_accepted_with_warnings(monkeypatch, settings, env_info):
+    client = _patch(monkeypatch, [make_response(manim_code=SOFT_ONLY_MANIM)] * 3)
+    workspace = JobWorkspace(f"test_{next_id()}")
+
+    result = generate(load_sample("two_sum.json"), workspace, settings, env_info)
+
+    # Soft problems are fed back, but the third attempt is accepted anyway.
+    assert len(client.prompts) == 3
+    assert "70 characters" in client.prompts[1]
+    assert result.generation_warnings
+    assert any("70 characters" in warning for warning in result.generation_warnings)
+
+    doc = json.loads(workspace.generation_path.read_text(encoding="utf-8"))
+    assert doc["generation_warnings"] == result.generation_warnings
+    assert (
+        workspace.animation_path.read_text(encoding="utf-8").strip()
+        == SOFT_ONLY_MANIM.strip()
+    )
+
+
+def test_a_clean_attempt_after_a_soft_one_wins(monkeypatch, settings, env_info):
+    client = _patch(monkeypatch, [make_response(manim_code=SOFT_ONLY_MANIM), make_response()])
+    workspace = JobWorkspace(f"test_{next_id()}")
+
+    result = generate(load_sample("two_sum.json"), workspace, settings, env_info)
+
+    assert len(client.prompts) == 2
+    assert result.generation_warnings == []
+    assert (
+        workspace.animation_path.read_text(encoding="utf-8").strip()
+        == VALID_MANIM.strip()
+    )
+
+
+def test_the_best_soft_attempt_is_kept(monkeypatch, settings, env_info):
+    responses = [
+        make_response(manim_code=SOFT_ONLY_MANIM),
+        make_response(manim_code=VALID_MANIM + "\nimport os\n"),
+        make_response(manim_code=SUPER_SOFT_MANIM),
+    ]
+    _patch(monkeypatch, responses)
+    workspace = JobWorkspace(f"test_{next_id()}")
+
+    result = generate(load_sample("two_sum.json"), workspace, settings, env_info)
+
+    # The hard-broken attempt is unusable; of the two soft ones, one problem wins.
+    assert len(result.generation_warnings) == 1
+    assert (
+        workspace.animation_path.read_text(encoding="utf-8").strip()
+        == SOFT_ONLY_MANIM.strip()
+    )
+    assert result.meta.solution_source == "provided"
+
+
+def test_hard_problems_still_fail_the_job(monkeypatch, settings, env_info):
+    broken = make_response(manim_code=VALID_MANIM + "\nimport os\n")
+    client = _patch(monkeypatch, [broken] * 3)
+    workspace = JobWorkspace(f"test_{next_id()}")
+
+    with pytest.raises(GenerationError) as excinfo:
+        generate(load_sample("two_sum.json"), workspace, settings, env_info)
+
+    assert len(client.prompts) == 3
+    assert any("import of 'os'" in problem for problem in excinfo.value.problems)
+
+
+def test_hard_beats_soft_in_the_retry_feedback(monkeypatch, settings, env_info):
+    responses = [
+        make_response(manim_code=SOFT_ONLY_MANIM),
+        make_response(manim_code=VALID_MANIM + "\nimport os\n"),
+        make_response(manim_code=VALID_MANIM + "\nimport os\n"),
+    ]
+    client = _patch(monkeypatch, responses)
+    workspace = JobWorkspace(f"test_{next_id()}")
+
+    generate(load_sample("two_sum.json"), workspace, settings, env_info)
+
+    # Attempt 2's prompt carries the soft problem; attempt 3's carries the hard one.
+    assert "70 characters" in client.prompts[1]
+    assert "import of 'os' is not allowed" in client.prompts[2]

@@ -83,6 +83,11 @@ class JobWorkspace:
         return self.root / "generation.json"
 
     @property
+    def request_path(self) -> Path:
+        """The payload that produced this job (used to re-upload by hand)."""
+        return self.root / "request.json"
+
+    @property
     def frames_dir(self) -> Path:
         return self.root / "frames"
 

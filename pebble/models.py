@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from pebble.config import PIPELINE_VERSION
+
 DEFAULT_LANGUAGE = "python"
 DEFAULT_EXPLANATION_LANGUAGE = "English"
 DEFAULT_STYLE = "beginner_friendly"
@@ -136,6 +138,7 @@ class VideoRequest(BaseModel):
     def request_fingerprint(self) -> str:
         """Stable sha256 cache key over the values that define the work."""
         parts = [
+            PIPELINE_VERSION,
             self.request_kind,
             str(self.question_or_empty.id) if _present(self.question_or_empty.id) else "",
             (self.question_or_empty.slug or "").strip(),
@@ -215,6 +218,8 @@ class GenerationResult(BaseModel):
     solution_code: str = ""
     manim_code: str = ""
     style_name: str = DEFAULT_STYLE
+    # Soft validation problems accepted on the best attempt (never fatal).
+    generation_warnings: list[str] = []
 
     @property
     def scenes(self) -> list[SceneMeta]:

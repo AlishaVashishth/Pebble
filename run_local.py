@@ -9,10 +9,14 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pebble import __version__
 from pebble.config import load_settings, voice_for_language
+from pebble.storage import anonymous_get
 from pebble.cost import COST_LOG_PATH, read_cost_log, summarize_cost_log
 from pebble.environment import detect
 from pebble.errors import PebbleError
@@ -177,6 +181,189 @@ def _check_manim_render(settings) -> tuple[bool, str]:
         if not matches:
             return False, "manim reported success but produced no mp4"
         return True, f"rendered {_human_size(matches[0].stat().st_size)} scene at -ql"
+
+
+@dataclass(frozen=True)
+class BlobStep:
+    """One step of the blob check, so each result can be reported alone."""
+
+    name: str
+    ok: bool
+    detail: str
+
+
+BLOB_PORTAL_HELP = (
+    "fix it in the Azure portal: (1) the storage account must allow blob anonymous "
+    "access (Configuration -> Allow Blob anonymous access: Enabled), (2) the "
+    "container access level must be 'Blob', (3) the account network access must "
+    "allow public access (Networking -> All networks)"
+)
+
+
+def _blob_steps() -> list[BlobStep]:
+    """Upload, anonymous fetch and delete: the full public-access path."""
+    from pebble.storage import BlobStorage
+
+    try:
+        storage = BlobStorage.from_env()
+    except PebbleError as exc:
+        return [BlobStep("config", False, str(exc))]
+
+    steps: list[BlobStep] = []
+    ready, detail = storage.ready()
+    steps.append(BlobStep("container", ready, detail))
+    if not ready:
+        return steps
+
+    granted = storage.try_enable_public_access()
+    steps.append(
+        BlobStep(
+            "access level",
+            True,
+            "set to 'Blob'" if granted else "could not set it; the anonymous check decides",
+        )
+    )
+
+    key = f"doctor/probe-{uuid.uuid4().hex}.mp4"
+    sample = _doctor_sample_video()
+    try:
+        size = storage.upload_file(sample, key, "video/mp4")
+        steps.append(BlobStep("upload", True, f"uploaded {_human_size(size)} to {key}"))
+    except Exception as exc:  # noqa: BLE001 - reported as a failed step
+        steps.append(BlobStep("upload", False, f"upload failed: {type(exc).__name__}"))
+        return steps
+    finally:
+        _cleanup_temp(sample)
+
+    url = storage.public_url(key)
+    try:
+        status, headers, body = anonymous_get(url)
+        content_type = headers.get("Content-Type") or headers.get("content-type") or "?"
+        ok = status == 200 and content_type.startswith("video/mp4") and len(body) > 0
+        detail = (
+            f"anonymous GET {status} content-type {content_type} "
+            f"content-length {len(body)}"
+        )
+        if not ok:
+            detail = f"{detail}; {BLOB_PORTAL_HELP}"
+        steps.append(BlobStep("anonymous fetch", ok, detail))
+    except Exception as exc:  # noqa: BLE001
+        steps.append(
+            BlobStep(
+                "anonymous fetch",
+                False,
+                f"request failed: {type(exc).__name__}; {BLOB_PORTAL_HELP}",
+            )
+        )
+    finally:
+        deleted = storage.delete(key)
+        steps.append(
+            BlobStep(
+                "delete",
+                True,
+                f"removed {key}" if deleted else f"could not remove {key} (harmless)",
+            )
+        )
+    return steps
+
+
+def _doctor_sample_video() -> Path:
+    """A one-second public test clip (a tiny mp4, not a placeholder string)."""
+    path = Path(tempfile.mkdtemp(prefix="pebble_blob_")) / "probe.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x0F172A:s=320x240:d=1:r=15",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=120,
+    )
+    return path
+
+
+def _cleanup_temp(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+        path.parent.rmdir()
+    except OSError:  # pragma: no cover - best effort
+        pass
+
+
+def run_blob_doctor() -> int:
+    setup_logging()
+    print("Pebble blob storage check")
+    steps = _blob_steps()
+    failed = False
+    for step in steps:
+        status = "PASS" if step.ok else "FAIL"
+        failed = failed or not step.ok
+        print(f"  [{status}] {step.name:<15} {step.detail}")
+    print("blob: " + ("FAILED" if failed else "OK"))
+    return 1 if failed else 0
+
+
+def run_upload_job(job_id: str, verbose: bool = False) -> int:
+    """Upload an already finished workspace job (retry a failed upload)."""
+    from pebble.models import VideoRequest
+    from pebble.storage import BlobStorage
+    from pebble.workspace import JobWorkspace
+
+    setup_logging(verbose=verbose)
+    workspace = JobWorkspace(job_id)
+    if not workspace.final_video_path.exists():
+        print(f"no final.mp4 in {workspace.root}", file=sys.stderr)
+        return 1
+
+    payload_path = workspace.root / "request.json"
+    fingerprint = None
+    generation = workspace.generation_path
+    if generation.exists():
+        fingerprint = json.loads(generation.read_text(encoding="utf-8")).get("fingerprint")
+    if not fingerprint and payload_path.exists():
+        fingerprint = VideoRequest.model_validate(
+            json.loads(payload_path.read_text(encoding="utf-8"))
+        ).request_fingerprint()
+    if not fingerprint:
+        print(
+            "cannot determine the fingerprint: no generation.json or request.json",
+            file=sys.stderr,
+        )
+        return 1
+
+    storage = BlobStorage.from_env()
+    metadata = _read_json_file(workspace.metadata_path)
+    result_doc = _read_json_file(workspace.result_path) or {}
+    solution = result_doc.get("solution") or {}
+    duration = float(result_doc.get("duration_seconds") or 0.0)
+    video_url = storage.public_url(storage.video_key(fingerprint))
+    bundle = {
+        "video_url": video_url,
+        "solution": solution,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "duration_seconds": duration,
+    }
+    storage.upload_job_bundle(fingerprint, workspace.final_video_path, metadata, bundle)
+    print(f"uploaded {job_id}")
+    print(f"  fingerprint : {fingerprint}")
+    print(f"  video url   : {video_url}")
+    return 0
+
+
+def _read_json_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 
 
 def run_doctor(deep: bool = False, verbose: bool = False, quiet: bool = False) -> int:
@@ -409,6 +596,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="with --doctor: also test live speech synthesis and a real manim render",
     )
+    parser.add_argument(
+        "--blob",
+        action="store_true",
+        help="check blob storage: upload, anonymous fetch, delete",
+    )
+    parser.add_argument(
+        "--upload-job",
+        default=None,
+        metavar="JOB_ID",
+        help="upload an already finished workspace job to blob storage",
+    )
     parser.add_argument("--job-id", default=None, help="reuse a specific workspace job id")
     parser.add_argument(
         "-v",
@@ -438,6 +636,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=f"Pebble {__version__}")
     args = parser.parse_args(argv)
+
+    if args.upload_job:
+        return run_upload_job(args.upload_job, verbose=args.verbose)
+
+    if args.blob:
+        return run_blob_doctor()
 
     if args.costs:
         return run_costs()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import re
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -272,10 +273,31 @@ def _check_config(tree: ast.AST) -> list[str]:
     return problems
 
 
-def _check_kit_rules(tree: ast.AST, manim_code: str) -> list[str]:
-    """Kit names are provided; never import or redefine them, and use a structure."""
+def _uses_structure(tree: ast.AST) -> set[str]:
+    """Kit structure classes instantiated somewhere in the script."""
+    used: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else None
+            if name in KIT_STRUCTURES:
+                used.add(name)
+    return used
+
+
+def _check_kit_structure_usage(tree: ast.AST) -> list[str]:
+    """Soft: prefer the kit over hand-placed shapes (never fatal)."""
+    if _uses_structure(tree):
+        return []
+    return [
+        "the script uses no kit structure: build the visualization with "
+        f"{sorted(KIT_STRUCTURES)} instead of hand-placed shapes"
+    ]
+
+
+def _check_kit_rules(tree: ast.AST, manim_code: str = "") -> list[str]:
+    """Kit names are provided; never import or redefine them."""
     problems: list[str] = []
-    used_structures: set[str] = set()
 
     for node in ast.walk(tree):
         where = getattr(node, "lineno", "?")
@@ -310,17 +332,6 @@ def _check_kit_rules(tree: ast.AST, manim_code: str) -> list[str]:
                         f"line {where}: '{target.id}' is provided by the visual kit; "
                         "do not reassign it"
                     )
-        elif isinstance(node, ast.Call):
-            func = node.func
-            name = func.id if isinstance(func, ast.Name) else None
-            if name in KIT_STRUCTURES:
-                used_structures.add(name)
-
-    if not used_structures:
-        problems.append(
-            "the script uses no kit structure: build the visualization with "
-            f"{sorted(KIT_STRUCTURES)} instead of hand-placed shapes"
-        )
     return problems
 
 
@@ -630,47 +641,79 @@ def _check_solution_state(
     return problems
 
 
-def validate_generation(
+@dataclass
+class ValidationProblems:
+    """Generation problems split by severity.
+
+    HARD problems make an attempt unusable: the response cannot be rendered or
+    it breaks the pipeline contract. SOFT problems are style/layout guidance:
+    they are fed back to the model on retries but never fail the job.
+    """
+
+    hard: list[str] = field(default_factory=list)
+    soft: list[str] = field(default_factory=list)
+
+    @property
+    def all(self) -> list[str]:
+        return [*self.hard, *self.soft]
+
+    def __bool__(self) -> bool:  # pragma: no cover - convenience
+        return bool(self.hard or self.soft)
+
+
+def validate_generation_split(
     result: GenerationResult, request: VideoRequest, env_info: EnvInfo
-) -> list[str]:
-    problems: list[str] = []
+) -> ValidationProblems:
+    """Every generation problem, split into hard and soft."""
+    hard: list[str] = []
+    soft: list[str] = []
 
     manim_code = result.manim_code or ""
     if not manim_code.strip():
-        problems.append("manim_code is empty")
-        return problems
+        return ValidationProblems(hard=["manim_code is empty"])
 
     if "from manim import *" not in manim_code:
-        problems.append("manim_code must start with 'from manim import *'")
+        hard.append("manim_code must start with 'from manim import *'")
 
     tree: ast.AST | None = None
     try:
         tree = ast.parse(manim_code)
     except SyntaxError as exc:
-        problems.append(f"manim_code is not valid Python: {exc.msg} (line {exc.lineno})")
+        hard.append(f"manim_code is not valid Python: {exc.msg} (line {exc.lineno})")
 
     if tree is not None:
-        problems.extend(_check_imports(tree))
-        problems.extend(_check_names(tree, env_info.latex_available))
-        problems.extend(_check_structure(manim_code, tree, result))
-        problems.extend(_check_config(tree))
-        problems.extend(_check_kit_rules(tree, manim_code))
-        problems.extend(_check_no_raw_text(tree))
-        problems.extend(_check_kit_methods(tree))
-        problems.extend(_check_intro_usage(tree))
-        problems.extend(_check_result_scene(tree))
-        problems.extend(_check_panel_lanes(tree))
-        problems.extend(_check_no_code(manim_code))
-        problems.extend(_check_text_sizes(tree))
-        problems.extend(_check_caption_length(tree))
+        # HARD: the script must be safe and structurally correct.
+        hard.extend(_check_imports(tree))
+        hard.extend(_check_names(tree, env_info.latex_available))
+        hard.extend(_check_structure(manim_code, tree, result))
+        hard.extend(_check_kit_rules(tree, manim_code))
+        # SOFT: presentation rules: guidance for the model, never fatal.
+        soft.extend(_check_config(tree))
+        soft.extend(_check_no_raw_text(tree))
+        soft.extend(_check_kit_structure_usage(tree))
+        soft.extend(_check_kit_methods(tree))
+        soft.extend(_check_intro_usage(tree))
+        soft.extend(_check_result_scene(tree))
+        soft.extend(_check_panel_lanes(tree))
+        soft.extend(_check_compare_panels_usage(tree, result))
+        soft.extend(_check_no_code(manim_code))
+        soft.extend(_check_text_sizes(tree))
+        soft.extend(_check_caption_length(tree))
 
-    problems.extend(_check_meta(result))
-    problems.extend(_check_solution_state(result, request))
+    hard.extend(_check_meta(result))
+    hard.extend(_check_solution_state(result, request))
 
     if not (result.solution_code or "").strip():
-        problems.append("solution_code is empty")
+        hard.append("solution_code is empty")
 
-    return problems
+    return ValidationProblems(hard=hard, soft=soft)
+
+
+def validate_generation(
+    result: GenerationResult, request: VideoRequest, env_info: EnvInfo
+) -> list[str]:
+    """Every generation problem (hard first); empty list means acceptable."""
+    return validate_generation_split(result, request, env_info).all
 
 
 # ---------------------------------------------------------------------------
@@ -766,6 +809,35 @@ def _check_result_scene(tree: ast.AST) -> list[str]:
 
 PANEL_ANCHORS = {"left_at", "right_at"}
 LANE_ANCHORS = {"LEFT_LANE", "RIGHT_LANE", "STAGE"}
+
+
+def _calls_in_scenes(tree: ast.AST) -> list[tuple[str, list[ast.Call]]]:
+    """(class name, calls) for every Scene class in the script."""
+    found: list[tuple[str, list[ast.Call]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        calls = [call for call in ast.walk(node) if isinstance(call, ast.Call)]
+        found.append((node.name, calls))
+    return found
+
+
+def _check_compare_panels_usage(tree: ast.AST, result: GenerationResult) -> list[str]:
+    """Soft: compare_panels is only for the bug-and-fix scene of a correction."""
+    if (result.meta.solution_source or "") == "corrected":
+        return []
+    problems: list[str] = []
+    for name, calls in _calls_in_scenes(tree):
+        for call in calls:
+            func = call.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if called == "compare_panels":
+                problems.append(
+                    f"class '{name}' uses compare_panels but solution_source is "
+                    f"'{result.meta.solution_source or 'empty'}': compare_panels is only "
+                    "for the bug-and-fix scene when solution_source is 'corrected'"
+                )
+    return problems
 
 
 def _check_panel_lanes(tree: ast.AST) -> list[str]:

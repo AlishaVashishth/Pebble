@@ -45,6 +45,15 @@ VOICE_MAP: dict[str, str] = {
 
 AZURE_SPEECH_VOICE_KEY = "AZURE_SPEECH_VOICE"
 
+# Bump when the *meaning* of a generated video changes (visuals, pacing,
+# narration), so previously cached videos for the same request are not reused.
+PIPELINE_VERSION = "1"
+
+# Layout audit mode for a render: "warn" logs issues, "strict" fails the scene.
+AUDIT_MODE_KEY = "PEBBLE_AUDIT"
+AUDIT_MODES = ("warn", "strict")
+DEFAULT_AUDIT_MODE = "warn"
+
 # Cost prices, USD per 1M units. Defaults are estimates: verify them against
 # the Azure OpenAI and Azure Speech pricing pages before trusting a total.
 LLM_INPUT_PRICE_KEY = "LLM_INPUT_PRICE_PER_1M"
@@ -98,6 +107,24 @@ def normalize_endpoint(value: str | None) -> str | None:
     return cleaned.rstrip("/") or None
 
 
+def speech_voice_override() -> str | None:
+    """The AZURE_SPEECH_VOICE override, if set (its value is never logged)."""
+    load_env()
+    return first_env((AZURE_SPEECH_VOICE_KEY,))
+
+
+def supported_languages() -> list[str]:
+    """Display names of the explanation languages that have a configured voice."""
+    return [name.title() for name in sorted(VOICE_MAP)]
+
+
+def is_supported_language(language: str | None) -> bool:
+    """True when a language has a voice; a configured override accepts any."""
+    if speech_voice_override() is not None:
+        return True
+    return (language or "").strip().lower() in VOICE_MAP
+
+
 def voice_for_language(language: str | None) -> str:
     """Resolve the Azure Speech voice for an explanation language.
 
@@ -147,6 +174,7 @@ class Settings:
     azure_speech_key: str | None = field(default=None, repr=False)
     azure_speech_region: str | None = None
     render_quality: str = "m"
+    audit_mode: str = DEFAULT_AUDIT_MODE
     max_generation_attempts: int = 3
     max_render_retries: int = 3
     max_output_tokens: int | None = None
@@ -166,6 +194,7 @@ class Settings:
             f"azure_speech_key={redact(self.azure_speech_key)}, "
             f"azure_speech_region={self.azure_speech_region!r}, "
             f"render_quality={self.render_quality!r}, "
+            f"audit_mode={self.audit_mode!r}, "
             f"max_generation_attempts={self.max_generation_attempts!r}, "
             f"max_render_retries={self.max_render_retries!r}, "
             f"max_output_tokens={self.max_output_tokens!r}, "
@@ -240,6 +269,12 @@ def load_settings() -> Settings:
     if quality not in {"l", "m", "h"}:
         raise ConfigError(f"RENDER_QUALITY must be one of l/m/h, got {quality!r}")
 
+    audit_mode = (os.environ.get(AUDIT_MODE_KEY) or DEFAULT_AUDIT_MODE).strip().lower()
+    if audit_mode not in AUDIT_MODES:
+        raise ConfigError(
+            f"{AUDIT_MODE_KEY} must be one of {'/'.join(AUDIT_MODES)}, got {audit_mode!r}"
+        )
+
     tokens_raw = os.environ.get("PEBBLE_MAX_OUTPUT_TOKENS")
     tokens: int | None = None
     if tokens_raw is not None and tokens_raw.strip():
@@ -253,6 +288,7 @@ def load_settings() -> Settings:
         azure_speech_key=first_env(AZURE_SPEECH_KEY_KEYS),
         azure_speech_region=first_env(AZURE_SPEECH_REGION_KEYS),
         render_quality=quality,
+        audit_mode=audit_mode,
         max_generation_attempts=_positive_int(
             os.environ.get("MAX_GENERATION_ATTEMPTS"), 3, "MAX_GENERATION_ATTEMPTS"
         ),

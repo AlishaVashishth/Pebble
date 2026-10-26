@@ -14,7 +14,7 @@ from pebble.models import GenerationResult, VideoRequest
 from pebble.parsing import parse_response
 from pebble.prompt_builder import build_prompt
 from pebble.styles import get_style
-from pebble.validators import validate_generation
+from pebble.validators import validate_generation_split
 from pebble.workspace import JobWorkspace
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ def _finalize(
         "style": style_name,
         "meta": result.meta.model_dump(),
         "solution": result.solution_code,
+        "generation_warnings": list(result.generation_warnings),
     }
     workspace.generation_path.write_text(
         json.dumps(generation_doc, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -73,6 +74,8 @@ def generate(
 
     all_problems: list[str] = []
     attempts = settings.max_generation_attempts
+    # Best attempt so far: (hard count, soft count) plus the accepted result.
+    best: tuple[int, int, GenerationResult] | None = None
 
     for attempt in range(1, attempts + 1):
         prompt = base_prompt if attempt == 1 else _retry_prompt(base_prompt, all_problems)
@@ -99,25 +102,47 @@ def generate(
             logger.warning("attempt %d/%d parse failed: %s", attempt, attempts, exc)
             continue
 
-        problems = validate_generation(result, request, env_info)
-        if problems:
-            all_problems = problems
-            logger.warning(
-                "attempt %d/%d rejected with %d problem(s); first: %s",
+        problems = validate_generation_split(result, request, env_info)
+        if not problems.hard and not problems.soft:
+            logger.info(
+                "generation succeeded on attempt %d/%d (%d scenes)",
                 attempt,
                 attempts,
-                len(problems),
-                "; ".join(problems[:3]),
+                len(result.meta.scenes),
             )
-            continue
+            return _finalize(result, request, workspace, style_name)
 
-        logger.info(
-            "generation succeeded on attempt %d/%d (%d scenes)",
-            attempt,
-            attempts,
-            len(result.meta.scenes),
+        if not problems.hard:
+            # Only style guidance: remember it, keep retrying, never fatal.
+            result.generation_warnings = problems.soft
+            if best is None or len(problems.soft) < best[1]:
+                best = (0, len(problems.soft), result)
+            logger.warning(
+                "attempt %d/%d has %d soft problem(s) (not fatal); first: %s",
+                attempt,
+                attempts,
+                len(problems.soft),
+                "; ".join(problems.soft[:3]),
+            )
+        else:
+            logger.warning(
+                "attempt %d/%d rejected with %d hard problem(s); first: %s",
+                attempt,
+                attempts,
+                len(problems.hard),
+                "; ".join(problems.hard[:3]),
+            )
+
+        all_problems = problems.all
+
+    if best is not None:
+        hard_free = best[2]
+        logger.warning(
+            "accepting attempt with %d generation warning(s): %s",
+            len(hard_free.generation_warnings),
+            "; ".join(hard_free.generation_warnings[:3]),
         )
-        return _finalize(result, request, workspace, style_name)
+        return _finalize(hard_free, request, workspace, style_name)
 
     raise GenerationError(
         f"Generation failed after {attempts} attempt(s); "
