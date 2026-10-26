@@ -59,8 +59,23 @@ def scene_time(scene) -> float:
         return 0.0
 
 
+def _audit(scene):
+    """Run the kit's layout audit on the finished frame (no-op without the kit)."""
+    try:
+        import pebble_kit
+    except Exception:
+        return []
+    audit = getattr(pebble_kit, "audit_scene", None)
+    if audit is None:
+        return []
+    return audit(scene)
+
+
 def finish_scene(scene, fade_time: float = FADE_OUT_TIME) -> None:
     """Hold the picture until the narration ends, then fade everything out."""
+    # Audit the final picture before the long hold: a broken frame then costs
+    # one short render instead of a full narration-length one.
+    _audit(scene)
     target = load_targets().get(type(scene).__name__)
     if target is not None:
         remaining = target - scene_time(scene) - fade_time

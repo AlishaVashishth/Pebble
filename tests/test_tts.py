@@ -109,3 +109,21 @@ def test_empty_narration_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr("pebble.tts._synth_audio", lambda *a: wav_bytes(0.3))
     with pytest.raises(TTSError):
         synthesize_scene("##  ", tmp_path / "a.wav", "voice", SPEECH_SETTINGS)
+
+
+def test_cancellation_text_works_without_a_from_result_helper(monkeypatch):
+    """The installed SDK (1.53) only exposes the constructor; older docs differ."""
+    import azure.cognitiveservices.speech as speechsdk
+
+    from pebble import tts
+
+    class FakeDetails:
+        def __init__(self, result):
+            self.reason = "Error"
+            self.error_code = "ServiceTimeout"
+            self.error_details = "the service timed out"
+
+    monkeypatch.setattr(speechsdk, "SpeechSynthesisCancellationDetails", FakeDetails)
+    text = tts._cancellation_text(object())
+    assert "ServiceTimeout" in text
+    assert "the service timed out" in text

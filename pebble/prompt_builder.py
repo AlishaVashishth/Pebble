@@ -20,6 +20,7 @@ from pebble.styles import get_style
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.txt"
 DIAGRAM_RECIPES_PATH = PROMPTS_DIR / "diagram_recipes.txt"
+KIT_REFERENCE_PATH = PROMPTS_DIR / "kit_reference.txt"
 FIXER_PROMPT_PATH = PROMPTS_DIR / "fixer_prompt.txt"
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
@@ -175,12 +176,13 @@ def build_prompt(request: VideoRequest, env_info: EnvInfo) -> str:
     """Fill system_prompt.txt in exactly one substitution pass."""
     template = _read(SYSTEM_PROMPT_PATH, "system prompt template")
     recipes = _read(DIAGRAM_RECIPES_PATH, "diagram recipes")
+    kit_reference = _read(KIT_REFERENCE_PATH, "visual kit reference")
 
     style_name, style_text = get_style(request.preferences_or_default.explanation_style)
 
     values: dict[str, str] = {
         "manim_version": env_info.manim_version,
-        "code_font": env_info.code_font,
+        "kit_reference": kit_reference,
         "latex_block": build_latex_block(env_info),
         "request_kind": request.request_kind,
         "input_block": build_input_block(request),

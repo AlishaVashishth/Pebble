@@ -51,3 +51,11 @@ class TTSError(PebbleError):
 
 class MuxError(PebbleError):
     """ffmpeg muxing or stitching failed."""
+
+
+class PebbleLayoutError(PebbleError):
+    """The layout audit found overlapping or off-frame content in a scene."""
+
+    def __init__(self, message: str, issues: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.issues = issues or []

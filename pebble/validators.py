@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import ast
 import re
+from functools import lru_cache
+from pathlib import Path
 
 from pebble.environment import EnvInfo
 from pebble.models import (
@@ -72,8 +74,65 @@ LATEX_ONLY_NAMES = {
 }
 
 FINISH_SCENE = "finish_scene"
-HELPERS_MODULE = "pebble_helpers"
-BACKGROUND_MARKER = "config.background_color"
+KIT_MODULES = {"pebble_kit", "pebble_helpers"}
+
+# Everything the kit provides. A generated script must never redefine these.
+KIT_STRUCTURES = {
+    "ArrayViz",
+    "MapViz",
+    "StackViz",
+    "QueueViz",
+    "LinkedListViz",
+    "TreeViz",
+    "GraphViz",
+    "GridViz",
+    "BarsViz",
+    "HeapViz",
+    "StatePanel",
+    "Pointer",
+}
+KIT_HELPERS = {
+    "show_title",
+    "title_card",
+    "set_caption",
+    "show_legend",
+    "step_tag",
+    "result_cards",
+    "compare_panels",
+    "audit_scene",
+}
+KIT_CONSTANTS = {
+    "STAGE",
+    "LEFT_LANE",
+    "RIGHT_LANE",
+    "T_FAST",
+    "T_STEP",
+    "T_SLOW",
+    "C_TEXT",
+    "C_MUTED",
+    "C_ACCENT",
+    "C_ACTIVE",
+    "C_GOOD",
+    "C_BAD",
+    "C_BG",
+    "C_PANEL",
+    "STATE_STYLES",
+}
+KIT_NAMES = KIT_STRUCTURES | KIT_HELPERS | KIT_CONSTANTS
+
+# Anything that reads as source code or pseudocode on screen.
+CODE_LINE_RE = re.compile(
+    r"(?m)^\s*(def|class|import|from|for|while|if|elif|else|return|yield|try|"
+    r"except|finally|raise|with|lambda|assert|print|pass|break|continue)\b"
+    r"[^\n]*(:|\(|=)"
+)
+SUBSCRIPT_RE = re.compile(
+    r"\b[A-Za-z_][A-Za-z0-9_]*\s*\[\s*[A-Za-z_][A-Za-z0-9_]*"
+    r"(\s*[+\-]\s*\d+)?\s*\]"
+)
+CALL_SYNTAX_RE = re.compile(r"\b[a-z_][a-z0-9_]*\([^()\n]*\)")
+CODE_OPERATORS = ("==", "!=", "+=", "-=", "*=", "/=", "//", "&&", "||")
+MIN_TEXT_SIZE = 20
 
 ALLOWED_SOLUTION_SOURCES = {"provided", "corrected", "generated"}
 REQUIRED_META_FIELDS = ("problem_summary", "solution_source", "programming_language", "complexity", "validation")
@@ -110,7 +169,16 @@ def validate_manim_code(
     problems.extend(_check_imports(tree))
     problems.extend(_check_names(tree, latex_available))
     problems.extend(_check_finish_scene(tree, list(expected_class_names)))
-    problems.extend(_check_background(manim_code))
+    problems.extend(_check_config(tree))
+    problems.extend(_check_kit_rules(tree, manim_code))
+    problems.extend(_check_no_raw_text(tree))
+    problems.extend(_check_kit_methods(tree))
+    problems.extend(_check_intro_usage(tree))
+    problems.extend(_check_result_scene(tree))
+    problems.extend(_check_panel_lanes(tree))
+    problems.extend(_check_no_code(manim_code))
+    problems.extend(_check_text_sizes(tree))
+    problems.extend(_check_caption_length(tree))
 
     found = scene_class_names(manim_code)
     if found != list(expected_class_names):
@@ -185,14 +253,194 @@ def _check_names(tree: ast.AST, latex_available: bool) -> list[str]:
     return problems
 
 
-def _check_background(manim_code: str) -> list[str]:
-    """A pure black background makes the finished video look empty and unfilmable."""
-    if BACKGROUND_MARKER in manim_code:
-        return []
-    return [
-        'set the background once at module level: config.background_color = "#0F172A" '
-        "(calm dark navy, never the default pure black)"
-    ]
+def _check_config(tree: ast.AST) -> list[str]:
+    """The kit owns the theme; a script must never touch Manim's config."""
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        name = None
+        if isinstance(node, ast.Name) and node.id in {"config", "tempconfig"}:
+            name = node.id
+        elif isinstance(node, ast.Attribute) and node.attr in {"config", "tempconfig"}:
+            name = node.attr
+        elif isinstance(node, ast.alias) and node.name in {"config", "tempconfig"}:
+            name = node.name
+        if name:
+            problems.append(
+                f"line {getattr(node, 'lineno', '?')}: do not use '{name}' - the visual "
+                "kit already sets the background, font and colours"
+            )
+    return problems
+
+
+def _check_kit_rules(tree: ast.AST, manim_code: str) -> list[str]:
+    """Kit names are provided; never import or redefine them, and use a structure."""
+    problems: list[str] = []
+    used_structures: set[str] = set()
+
+    for node in ast.walk(tree):
+        where = getattr(node, "lineno", "?")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in KIT_NAMES:
+                problems.append(
+                    f"line {where}: '{node.name}' is provided by the visual kit; "
+                    "do not redefine it"
+                )
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            module = (
+                node.module
+                if isinstance(node, ast.ImportFrom)
+                else (node.names[0].name if node.names else "")
+            )
+            root = (module or "").split(".")[0]
+            if root in KIT_MODULES:
+                problems.append(
+                    f"line {where}: the visual kit is already available; do not import "
+                    f"from '{root}'"
+                )
+            for alias in node.names:
+                if alias.name in KIT_NAMES | {FINISH_SCENE}:
+                    problems.append(
+                        f"line {where}: '{alias.name}' is provided by the pipeline; "
+                        "do not import it"
+                    )
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in KIT_NAMES:
+                    problems.append(
+                        f"line {where}: '{target.id}' is provided by the visual kit; "
+                        "do not reassign it"
+                    )
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else None
+            if name in KIT_STRUCTURES:
+                used_structures.add(name)
+
+    if not used_structures:
+        problems.append(
+            "the script uses no kit structure: build the visualization with "
+            f"{sorted(KIT_STRUCTURES)} instead of hand-placed shapes"
+        )
+    return problems
+
+
+def _check_no_code(manim_code: str) -> list[str]:
+    """No source code or pseudocode may be drawn: on-screen text is plain words."""
+    problems: list[str] = []
+    try:
+        tree = ast.parse(manim_code)
+    except SyntaxError:
+        return problems
+
+    # Docstrings are documentation, never drawn: do not scan them for code.
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in docstrings:
+            continue
+        value = node.value
+        if not value.strip():
+            continue
+        reason = None
+        if CODE_LINE_RE.search(value):
+            reason = "a line that reads as code"
+        elif SUBSCRIPT_RE.search(value):
+            reason = "indexing syntax like name[index]"
+        elif CALL_SYNTAX_RE.search(value):
+            reason = "function-call syntax"
+        elif any(operator in value for operator in CODE_OPERATORS):
+            reason = "a programming operator"
+        if reason:
+            snippet = value.strip().replace("\n", " ")[:48]
+            problems.append(
+                f"line {getattr(node, 'lineno', '?')}: on-screen text {snippet!r} contains "
+                f"{reason}; explain it in plain words and show the state with the kit"
+            )
+    return problems
+
+
+def _check_no_raw_text(tree: ast.AST) -> list[str]:
+    """All on-screen text must come from the kit, which places it safely."""
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name not in {"Text", "MarkupText"}:
+            continue
+        problems.append(
+            f"line {getattr(node, 'lineno', '?')}: do not place on-screen text yourself with "
+            f"{name}(...); use set_caption, show_title, title_card, step_tag, StatePanel, "
+            "result_cards, TreeViz.annotate or GraphViz.tag so the kit lays it out"
+        )
+    return problems
+
+
+def _check_caption_length(tree: ast.AST) -> list[str]:
+    """Captions are one short line: the kit truncates anything past 70 chars."""
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name != "set_caption":
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        text = node.args[0].value
+        if not isinstance(text, str):
+            continue
+        if len(" ".join(text.split())) > 70:
+            problems.append(
+                f"line {getattr(node, 'lineno', '?')}: caption {text[:40]!r}... is "
+                f"{len(' '.join(text.split()))} characters; captions are at most 70 "
+                "characters, so split the idea or move it into the narration"
+            )
+    return problems
+
+
+def _check_text_sizes(tree: ast.AST) -> list[str]:
+    """Text is set by the kit: no font= overrides and no tiny text."""
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name not in {"Text", "MarkupText", "Tex", "MathTex"}:
+            continue
+        where = getattr(node, "lineno", "?")
+        if any(keyword.arg == "font" for keyword in node.keywords):
+            problems.append(
+                f"line {where}: do not set font= - the kit already picked the UI font"
+            )
+        for keyword in node.keywords:
+            if keyword.arg != "font_size":
+                continue
+            size = keyword.value
+            if isinstance(size, ast.Constant) and isinstance(size.value, (int, float)):
+                if size.value < MIN_TEXT_SIZE:
+                    problems.append(
+                        f"line {where}: font_size {size.value} is too small; use at "
+                        f"least {MIN_TEXT_SIZE}"
+                    )
+    return problems
 
 
 def _is_finish_scene_call(node: ast.AST) -> bool:
@@ -228,13 +476,13 @@ def _check_finish_scene(tree: ast.AST, class_names: list[str]) -> list[str]:
                     "pipeline; do not define it"
                 )
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            if isinstance(node, ast.ImportFrom) and (node.module or "") == HELPERS_MODULE:
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in KIT_MODULES:
                 problems.append(
                     f"line {node.lineno}: {FINISH_SCENE} is provided by the pipeline; "
                     "do not import it"
                 )
             for alias in node.names:
-                if alias.name.split(".")[-1] == FINISH_SCENE or alias.name == HELPERS_MODULE:
+                if alias.name.split(".")[-1] == FINISH_SCENE or alias.name in KIT_MODULES:
                     problems.append(
                         f"line {node.lineno}: {FINISH_SCENE} is provided by the pipeline; "
                         "do not import it"
@@ -405,7 +653,16 @@ def validate_generation(
         problems.extend(_check_imports(tree))
         problems.extend(_check_names(tree, env_info.latex_available))
         problems.extend(_check_structure(manim_code, tree, result))
-        problems.extend(_check_background(manim_code))
+        problems.extend(_check_config(tree))
+        problems.extend(_check_kit_rules(tree, manim_code))
+        problems.extend(_check_no_raw_text(tree))
+        problems.extend(_check_kit_methods(tree))
+        problems.extend(_check_intro_usage(tree))
+        problems.extend(_check_result_scene(tree))
+        problems.extend(_check_panel_lanes(tree))
+        problems.extend(_check_no_code(manim_code))
+        problems.extend(_check_text_sizes(tree))
+        problems.extend(_check_caption_length(tree))
 
     problems.extend(_check_meta(result))
     problems.extend(_check_solution_state(result, request))
@@ -413,4 +670,214 @@ def validate_generation(
     if not (result.solution_code or "").strip():
         problems.append("solution_code is empty")
 
+    return problems
+
+
+# ---------------------------------------------------------------------------
+# kit methods: the reference is the contract
+# ---------------------------------------------------------------------------
+
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+KIT_REFERENCE_PATH = PROMPTS_DIR / "kit_reference.txt"
+
+# Mobject methods a script may always call on a kit structure.
+KIT_MOBJECT_METHODS = {
+    "animate",
+    "copy",
+    "get_center",
+    "get_left",
+    "get_right",
+    "get_top",
+    "get_bottom",
+    "get_width",
+    "get_height",
+    "next_to",
+    "scale",
+    "set_opacity",
+    "set_z_index",
+    "shift",
+    "move_to",
+    "to_edge",
+    "to_corner",
+}
+
+
+@lru_cache(maxsize=1)
+def kit_structure_methods() -> dict[str, set[str]]:
+    """Structure name -> documented methods, parsed from kit_reference.txt."""
+    try:
+        text = KIT_REFERENCE_PATH.read_text(encoding="utf-8")
+    except OSError:  # pragma: no cover - the file ships with the package
+        return {}
+
+    methods: dict[str, set[str]] = {}
+    owner: str | None = None
+    for line in text.splitlines():
+        match = re.match(r"^  ([A-Za-z_][A-Za-z0-9_]*)\(", line)
+        if match:
+            owner = match.group(1)
+            if owner in KIT_STRUCTURES:
+                methods.setdefault(owner, {"intro"})
+            continue
+        if owner in methods and re.match(r"^ {6}\.", line):
+            methods[owner].update(re.findall(r"\.(\w+)\(", line))
+    return methods
+
+
+def _check_result_scene(tree: ast.AST) -> list[str]:
+    """The closing scene is the result cards: no structures, no chips."""
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        construct = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "construct"
+            ),
+            None,
+        )
+        if construct is None:
+            continue
+        calls = [call for call in ast.walk(construct) if isinstance(call, ast.Call)]
+        uses_cards = any(
+            (isinstance(call.func, ast.Name) and call.func.id == "result_cards")
+            or (isinstance(call.func, ast.Attribute) and call.func.attr == "result_cards")
+            for call in calls
+        )
+        if not uses_cards:
+            continue
+        structures = sorted(
+            {
+                call.func.id
+                for call in calls
+                if isinstance(call.func, ast.Name) and call.func.id in KIT_STRUCTURES
+            }
+        )
+        if structures:
+            problems.append(
+                f"class '{node.name}' uses result_cards and also builds "
+                f"{structures}; the closing scene shows the three result cards and "
+                "nothing else (move the visualization to an earlier scene)"
+            )
+    return problems
+
+
+PANEL_ANCHORS = {"left_at", "right_at"}
+LANE_ANCHORS = {"LEFT_LANE", "RIGHT_LANE", "STAGE"}
+
+
+def _check_panel_lanes(tree: ast.AST) -> list[str]:
+    """Inside compare panels every structure uses left_at/right_at only.
+
+    The classic layout defect was a map at a panel anchor and an array at
+    LEFT_LANE: both land in the same half of the stage and their text collides.
+    """
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        construct = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "construct"
+            ),
+            None,
+        )
+        if construct is None:
+            continue
+        calls = [call for call in ast.walk(construct) if isinstance(call, ast.Call)]
+        uses_panels = any(
+            (isinstance(call.func, ast.Name) and call.func.id == "compare_panels")
+            or (isinstance(call.func, ast.Attribute) and call.func.attr == "compare_panels")
+            for call in calls
+        )
+        if not uses_panels:
+            continue
+        lanes = sorted(
+            {
+                name.id
+                for name in ast.walk(construct)
+                if isinstance(name, ast.Name) and name.id in LANE_ANCHORS
+            }
+        )
+        if lanes:
+            problems.append(
+                f"class '{node.name}' uses compare_panels together with {lanes}; "
+                "inside a compare scene every structure goes at left_at or "
+                "right_at (one per panel), never in a lane"
+            )
+        for call in calls:
+            func = call.func
+            name = func.id if isinstance(func, ast.Name) else None
+            # StatePanel has no at= anchor (chips sit under the panels), so it is
+            # exempt; only the drawn structures must pick a panel.
+            if name not in KIT_STRUCTURES or name == "StatePanel":
+                continue
+            if not any(keyword.arg == "at" for keyword in call.keywords):
+                problems.append(
+                    f"line {getattr(call, 'lineno', '?')}: {name} in a compare_panels "
+                    "scene needs at=left_at or at=right_at; the default anchors it "
+                    "in the middle, on top of both panels"
+                )
+    return problems
+
+
+def _check_intro_usage(tree: ast.AST) -> list[str]:
+    """``.intro()`` returns an Animation: play it, never keep it as the object."""
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        func = node.value.func
+        if isinstance(func, ast.Attribute) and func.attr in {"intro", "to", "hide"}:
+            target = node.targets[0]
+            name = target.id if isinstance(target, ast.Name) else "this value"
+            problems.append(
+                f"line {getattr(node, 'lineno', '?')}: '{func.attr}()' returns an "
+                f"Animation, so '{name}' is not the structure. Never chain it onto "
+                "the constructor: write the structure on its own line "
+                f"('{name} = MapViz(...)') and then "
+                f"'self.play({name}.{func.attr}(...))'."
+            )
+    return problems
+
+
+def _check_kit_methods(tree: ast.AST) -> list[str]:
+    """Only documented kit methods exist: catch invented names before rendering."""
+    allowed = kit_structure_methods()
+    if not allowed:
+        return []
+
+    owners: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in allowed
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    owners[target.id] = node.value.func.id
+
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        base = node.func.value
+        if not isinstance(base, ast.Name):
+            continue
+        owner = owners.get(base.id)
+        if owner is None:
+            continue
+        method = node.func.attr
+        if method in allowed.get(owner, set()) or method in KIT_MOBJECT_METHODS:
+            continue
+        problems.append(
+            f"line {getattr(node, 'lineno', '?')}: '{method}' is not a method of {owner}; "
+            f"use one of {sorted(allowed.get(owner, set()))}"
+        )
     return problems

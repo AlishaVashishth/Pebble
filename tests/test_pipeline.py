@@ -138,7 +138,11 @@ def test_pipeline_produces_a_finished_video(monkeypatch, tmp_path):
     assert (workspace / "pipeline.log").read_text(encoding="utf-8").strip()
     assert (workspace / "pebble_helpers.py").exists()
     render_script = (workspace / "animation_render.py").read_text(encoding="utf-8")
-    assert render_script.startswith("from pebble_helpers import finish_scene; from manim import *")
+    assert render_script.startswith(
+        "from pebble_kit import *; from pebble_helpers import finish_scene; "
+        "from manim import *"
+    )
+    assert (result.workspace / "pebble_kit.py").exists()
     assert render_script.splitlines()[1:] == (workspace / "animation.py").read_text(
         encoding="utf-8"
     ).splitlines()[1:]

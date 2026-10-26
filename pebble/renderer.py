@@ -1,19 +1,28 @@
-"""Render each scene with Manim, repairing the script when a scene fails.
+"""Render each scene with Manim, repairing crashes *and* layout problems.
 
 The generated script is rendered through a wrapper file, ``animation_render.py``,
-which is the script text with the helper import prepended on the *same first
-line*. Line numbers therefore stay identical to ``animation.py``, which matters
-for the repair loop: the stderr tail we feed back points at the real script.
+which is the script text with the kit and helper imports prepended on the *same
+first line*. Line numbers therefore stay identical to ``animation.py``, which
+matters for the repair loop: the stderr tail we feed back points at the real
+script.
+
+Every scene also runs the kit's layout audit. In strict mode a broken frame
+raises before the narration-length hold, so the render fails fast and the repair
+loop gets the audit's findings. If a scene still has layout problems after the
+repair budget, the scene is re-rendered in warn mode: a slightly imperfect frame
+must not lose the whole video.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -35,8 +44,11 @@ ERROR_TAIL_LINES = 60
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 HELPERS_TEMPLATE = TEMPLATES_DIR / "pebble_helpers.py"
-HELPER_IMPORT = "from pebble_helpers import finish_scene; "
+KIT_TEMPLATE = TEMPLATES_DIR / "pebble_kit.py"
+HELPER_IMPORT = "from pebble_kit import *; from pebble_helpers import finish_scene; "
 REQUIRED_FIRST_LINE = "from manim import *"
+AUDIT_DIR = "audit"
+STRICT_ENV = "PEBBLE_LAYOUT_STRICT"
 
 
 @dataclass(frozen=True)
@@ -47,6 +59,17 @@ class SceneRender:
     duration: float
     repair_attempts: int = 0
     repairs_applied: int = 0
+    layout_issues: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RenderAttempt:
+    """One manim invocation plus what the layout audit said about it."""
+
+    output: Path | None
+    error: str
+    issues: list[str] = field(default_factory=list)
+    layout_failed: bool = False
 
 
 def tail_lines(text: str, count: int = ERROR_TAIL_LINES) -> str:
@@ -73,29 +96,45 @@ def scene_targets(result: GenerationResult) -> list[SceneMeta]:
     return list(result.meta.scenes)
 
 
-def install_helpers(workspace: JobWorkspace) -> Path:
-    """Copy the pipeline helper module next to the script (found via cwd)."""
-    if not HELPERS_TEMPLATE.exists():
-        raise RenderError(f"helper template is missing: {HELPERS_TEMPLATE}")
-    shutil.copyfile(HELPERS_TEMPLATE, workspace.helpers_path)
-    return workspace.helpers_path
+def install_runtime(workspace: JobWorkspace) -> None:
+    """Copy the kit and the helper module next to the script (found via cwd)."""
+    for template, destination in (
+        (KIT_TEMPLATE, workspace.kit_path),
+        (HELPERS_TEMPLATE, workspace.helpers_path),
+    ):
+        if not template.exists():
+            raise RenderError(f"runtime template is missing: {template}")
+        shutil.copyfile(template, destination)
 
 
 def build_render_script(workspace: JobWorkspace) -> Path:
-    """Write animation_render.py: helper import + script on the same first line."""
+    """Write animation_render.py: kit + helper import on the script's first line."""
     script = workspace.animation_path.read_text(encoding="utf-8")
     first_line = script.splitlines()[0].strip() if script.strip() else ""
     if first_line != REQUIRED_FIRST_LINE:
         raise RenderError(
             "animation.py must start with 'from manim import *' "
-            f"(found {first_line[:60]!r}); cannot attach the finish_scene helper"
+            f"(found {first_line[:60]!r}); cannot attach the visual kit"
         )
     workspace.animation_render_path.write_text(HELPER_IMPORT + script, encoding="utf-8")
     return workspace.animation_render_path
 
 
+def read_audit(workspace: JobWorkspace, class_name: str) -> list[str]:
+    """Layout issues the kit wrote while finishing this scene (empty if none)."""
+    path = workspace.root / AUDIT_DIR / f"{class_name}.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    issues = payload.get("issues") or []
+    return [str(issue) for issue in issues]
+
+
 class SceneRenderer:
-    """Owns the current animation.py and the per-scene repair loop."""
+    """Owns the current animation.py, the repair loop and the layout audit."""
 
     def __init__(
         self,
@@ -120,8 +159,13 @@ class SceneRenderer:
         return self._client
 
     # -- manim ---------------------------------------------------------
-    def _run_manim(self, class_name: str) -> tuple[Path | None, str]:
+    def _run_manim(self, class_name: str, strict: bool = True) -> RenderAttempt:
         media_dir = self.workspace.media_dir / class_name
+        media_dir.mkdir(parents=True, exist_ok=True)
+        for stale in media_dir.rglob(f"{class_name}.mp4"):
+            if "partial_movie_files" not in stale.parts:
+                stale.unlink(missing_ok=True)
+
         quality = f"-q{self.settings.render_quality}"
         cmd = [
             sys.executable,
@@ -137,6 +181,8 @@ class SceneRenderer:
             str(self.workspace.animation_render_path),
             class_name,
         ]
+        env = dict(os.environ)
+        env[STRICT_ENV] = "1" if strict else "0"
 
         started = time.monotonic()
         try:
@@ -146,24 +192,41 @@ class SceneRenderer:
                 capture_output=True,
                 text=True,
                 timeout=MANIM_TIMEOUT,
+                env=env,
             )
             stdout, stderr, code = completed.stdout, completed.stderr, completed.returncode
         except subprocess.TimeoutExpired:
-            return None, f"manim timed out after {MANIM_TIMEOUT}s rendering {class_name}"
+            error = f"manim timed out after {MANIM_TIMEOUT}s rendering {class_name}"
+            return RenderAttempt(None, error, [], False)
         except OSError as exc:
-            return None, f"manim could not start: {exc}"
+            return RenderAttempt(None, f"manim could not start: {exc}", [], False)
 
         elapsed = time.monotonic() - started
         self._write_render_log(class_name, cmd, stdout, stderr, code, elapsed)
-
+        issues = read_audit(self.workspace, class_name)
         output = self._find_output(media_dir, class_name)
+
         if code == 0 and output is not None:
-            logger.info("[render] %s ok  %.1fs", class_name, elapsed)
-            return output, ""
+            logger.info(
+                "[render] %s ok  %.1fs%s",
+                class_name,
+                elapsed,
+                f"  ({len(issues)} layout issue(s))" if issues else "",
+            )
+            return RenderAttempt(output, "", issues, False)
 
         error = tail_lines(stderr) or tail_lines(stdout) or f"manim exited with code {code}"
-        logger.warning("[render] %s failed (exit %s)  %.1fs", class_name, code, elapsed)
-        return None, error
+        layout_failed = bool(issues) and (
+            "PebbleLayoutError" in (stderr or "") or "layout audit" in (stderr or "")
+        )
+        logger.warning(
+            "[render] %s %s (exit %s)  %.1fs",
+            class_name,
+            "failed the layout audit" if layout_failed else "failed",
+            code,
+            elapsed,
+        )
+        return RenderAttempt(None, error, issues, layout_failed)
 
     def _write_render_log(
         self,
@@ -201,10 +264,24 @@ class SceneRenderer:
         return sorted(candidates, key=lambda path: len(path.parts))[0]
 
     # -- repair --------------------------------------------------------
-    def _try_repair(self, class_name: str, error: str, expected: list[str]) -> str | None:
+    def _repair_problems(self, attempt: RenderAttempt) -> str:
+        if attempt.layout_failed:
+            lines = "\n".join(f"- {issue}" for issue in attempt.issues[:8])
+            return (
+                "The scene rendered but the automatic layout audit rejected the "
+                "finished frame. Fix the layout so nothing overlaps and everything "
+                "stays inside the frame. Use the kit's own helpers and structures "
+                "instead of hand-placed text wherever possible.\n"
+                f"LAYOUT PROBLEMS:\n{lines}"
+            )
+        return attempt.error
+
+    def _try_repair(
+        self, class_name: str, problems: str, expected: list[str]
+    ) -> str | None:
         """Ask the LLM for a fix. Returns the accepted code, or None if rejected."""
         script = self.workspace.animation_path.read_text(encoding="utf-8")
-        prompt = build_fixer_prompt(script, class_name, error, self.env_info)
+        prompt = build_fixer_prompt(script, class_name, problems, self.env_info)
         response = self.client.call_llm(prompt)
 
         if self.cost is not None:
@@ -218,13 +295,15 @@ class SceneRenderer:
 
         candidate = strip_markdown_fences(response.text)
 
-        problems = validate_manim_code(candidate, expected, self.env_info.latex_available)
-        if problems:
+        problems_found = validate_manim_code(
+            candidate, expected, self.env_info.latex_available
+        )
+        if problems_found:
             logger.warning(
                 "repair for %s rejected (%d problem(s)): %s",
                 class_name,
-                len(problems),
-                "; ".join(problems[:3]),
+                len(problems_found),
+                "; ".join(problems_found[:3]),
             )
             return None
         return candidate
@@ -238,11 +317,11 @@ class SceneRenderer:
     def render_scene(self, scene: SceneMeta, index: int) -> SceneRender:
         expected = self.expected_names
         logger.info("[render %d/%d] %s", index, len(expected), scene.class_name)
-        output, error = self._run_manim(scene.class_name)
+        attempt = self._run_manim(scene.class_name, strict=True)
         attempts = 0
         applied = 0
 
-        while output is None and attempts < self.settings.max_render_retries:
+        while attempt.output is None and attempts < self.settings.max_render_retries:
             attempts += 1
             logger.info(
                 "[render %d/%d] %s repair attempt %d/%d",
@@ -252,7 +331,9 @@ class SceneRenderer:
                 attempts,
                 self.settings.max_render_retries,
             )
-            candidate = self._try_repair(scene.class_name, error, expected)
+            candidate = self._try_repair(
+                scene.class_name, self._repair_problems(attempt), expected
+            )
             if candidate is None:
                 continue
 
@@ -261,18 +342,36 @@ class SceneRenderer:
             build_render_script(self.workspace)
             applied += 1
             # Only the failing scene is re-rendered; finished scenes are kept.
-            output, error = self._run_manim(scene.class_name)
+            attempt = self._run_manim(scene.class_name, strict=True)
 
-        if output is None:
+        if attempt.output is None and attempt.layout_failed:
+            # Layout-only failure: keep the video rather than losing the job.
+            logger.warning(
+                "[render] %s still has layout problems after %d repair(s); "
+                "re-rendering in warn mode",
+                scene.class_name,
+                attempts,
+            )
+            attempt = self._run_manim(scene.class_name, strict=False)
+
+        if attempt.output is None:
             raise RenderError(
                 f"scene {scene.class_name} failed to render after "
                 f"{attempts} repair attempt(s)",
                 scene_class=scene.class_name,
-                error_tail=error,
+                error_tail=attempt.error,
+            )
+
+        if attempt.issues:
+            logger.warning(
+                "[layout] %s kept %d issue(s): %s",
+                scene.class_name,
+                len(attempt.issues),
+                "; ".join(attempt.issues[:3]),
             )
 
         destination = self.workspace.scenes_dir / f"{index:02d}_{scene.class_name}.mp4"
-        shutil.copyfile(output, destination)
+        shutil.copyfile(attempt.output, destination)
         duration = probe_duration(destination)
         return SceneRender(
             index=index,
@@ -281,6 +380,7 @@ class SceneRenderer:
             duration=duration,
             repair_attempts=attempts,
             repairs_applied=applied,
+            layout_issues=list(attempt.issues),
         )
 
 
@@ -295,7 +395,7 @@ def render_scenes(
 ) -> list[SceneRender]:
     """Render every scene in order; raises RenderError instead of skipping one."""
     scenes = scene_targets(result)
-    install_helpers(workspace)
+    install_runtime(workspace)
     build_render_script(workspace)
 
     renderer = SceneRenderer(

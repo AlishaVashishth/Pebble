@@ -5,7 +5,16 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
-SUBFOLDERS = ("llm", "scenes", "audio", "muxed", "media", "frames", "render_logs")
+SUBFOLDERS = (
+    "llm",
+    "scenes",
+    "audio",
+    "muxed",
+    "media",
+    "frames",
+    "render_logs",
+    "audit",
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
@@ -52,6 +61,14 @@ class JobWorkspace:
     @property
     def helpers_path(self) -> Path:
         return self.root / "pebble_helpers.py"
+
+    @property
+    def kit_path(self) -> Path:
+        return self.root / "pebble_kit.py"
+
+    @property
+    def audit_dir(self) -> Path:
+        return self.root / "audit"
 
     @property
     def targets_path(self) -> Path:

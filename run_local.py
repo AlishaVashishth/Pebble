@@ -350,6 +350,24 @@ def run_full(
     return 0
 
 
+def run_kit_gallery(verbose: bool = False, quiet: bool = False) -> int:
+    """Render the visual-kit gallery and report its layout-audit issues."""
+    setup_logging(verbose=verbose, quiet=quiet)
+    from pebble.gallery import run_gallery
+
+    result = run_gallery()
+    print("\nkit gallery")
+    print(f"  video          : {result.video}")
+    print(f"  duration       : {result.duration:.1f}s")
+    print(f"  contact sheet  : {result.contact_sheet}")
+    print(f"  scenes         : {len(result.audit_issues)}")
+    for name, issues in result.audit_issues.items():
+        for issue in issues:
+            print(f"    issue {name}: {issue}")
+    print(f"\naudit issue count: {result.issue_count}")
+    return 0 if result.issue_count == 0 else 1
+
+
 def run_costs() -> int:
     entries = read_cost_log(COST_LOG_PATH)
     if not entries:
@@ -408,6 +426,11 @@ def main(argv: list[str] | None = None) -> int:
         "--costs", action="store_true", help="summarise workspace/cost_log.jsonl"
     )
     parser.add_argument(
+        "--kit-gallery",
+        action="store_true",
+        help="render the visual-kit gallery and check the layout audit",
+    )
+    parser.add_argument(
         "--stage",
         default="full",
         choices=["generate", "full"],
@@ -418,6 +441,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.costs:
         return run_costs()
+
+    if args.kit_gallery:
+        return run_kit_gallery(verbose=args.verbose, quiet=args.quiet)
 
     if args.doctor:
         return run_doctor(deep=args.deep, verbose=args.verbose, quiet=args.quiet)

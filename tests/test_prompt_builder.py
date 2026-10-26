@@ -38,7 +38,7 @@ def _values(request, env_info):
     style_name, style_text = _gs(request.preferences_or_default.explanation_style)
     return {
         "manim_version": env_info.manim_version,
-        "code_font": env_info.code_font,
+        "kit_reference": pb._read(pb.KIT_REFERENCE_PATH, "visual kit reference"),
         "latex_block": pb.build_latex_block(env_info),
         "request_kind": request.request_kind,
         "input_block": pb.build_input_block(request),
@@ -116,6 +116,22 @@ def test_diagram_recipes_are_included(env_info):
     prompt = build_prompt(load_sample("two_sum.json"), env_info)
     assert "CODE VISUALIZATION VOCABULARY" in prompt
     assert "CONSISTENCY REQUIREMENTS" in prompt
+
+
+def test_kit_reference_is_included(env_info):
+    prompt = build_prompt(load_sample("two_sum.json"), env_info)
+    assert "VISUAL KIT" in prompt
+    assert "ArrayViz(values, label=None, show_index=True)" in prompt
+    assert "compare_panels(self, left_title, right_title" in prompt
+
+
+def test_prompt_no_longer_talks_about_drawing_code(env_info):
+    prompt = build_prompt(load_sample("two_sum.json"), env_info)
+    assert "code_font" not in prompt
+    assert "for code shown on screen" not in prompt
+    assert "Code class" not in prompt.split("=== THE VISUAL KIT")[0]
+    assert "NOTHING THAT LOOKS LIKE CODE" in prompt
+    assert "font=\"" not in prompt
 
 
 def test_unknown_placeholder_raises(monkeypatch, tmp_path, env_info):

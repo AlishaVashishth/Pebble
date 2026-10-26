@@ -21,12 +21,11 @@ ENV = EnvInfo(
 
 SCRIPT = '''from manim import *
 
-config.background_color = "#0F172A"
-
 
 class Scene1_Hold(Scene):
     def construct(self):
-        self.play(Create(Dot()), run_time={animation:.1f})
+        nums = ArrayViz([1, 2, 3])
+        self.play(nums.intro(), run_time={animation:.1f})
         finish_scene(self)
 '''
 

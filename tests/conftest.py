@@ -20,8 +20,6 @@ SAMPLES = PROJECT_ROOT / "samples"
 
 VALID_MANIM = '''from manim import *
 
-config.background_color = "#0F172A"
-
 
 def build_trace():
     values = [2, 7, 11, 15]
@@ -30,18 +28,19 @@ def build_trace():
 
 class Scene1_Intro(Scene):
     def construct(self):
-        title = Text("Two Sum", font_size=40)
-        self.play(FadeIn(title), run_time=1)
-        self.wait(1.2)
+        self.title_card("Two Sum", "Find two numbers that add to a target")
+        self.set_caption("Each number needs a partner")
+        self.wait(1)
         finish_scene(self)
 
 
 class Scene2_Trace(Scene):
     def construct(self):
         trace = build_trace()
-        cells = VGroup(*[Square(side_length=1) for _ in trace])
-        cells.arrange(RIGHT)
-        self.add(cells)
+        nums = ArrayViz([value for _, value in trace])
+        self.play(nums.intro())
+        chips = StatePanel({"need": 7})
+        self.play(chips.intro())
         self.wait(1.6)
         finish_scene(self)
 '''
@@ -206,21 +205,20 @@ def wav_bytes(seconds: float = 1.0, freq: int = 440, rate: int = 16000) -> bytes
 
 TINY_MANIM = '''from manim import *
 
-config.background_color = "#0F172A"
-
 
 class Scene1_Intro(Scene):
     def construct(self):
-        self.play(Write(Text("Two Sum")), run_time=0.6)
-        self.wait(0.4)
+        nums = ArrayViz([2, 7])
+        self.play(nums.intro(), run_time=0.4)
+        self.wait(0.2)
         finish_scene(self)
 
 
 class Scene2_Trace(Scene):
     def construct(self):
-        cells = VGroup(*[Square(side_length=0.6) for _ in range(3)])
-        cells.arrange(RIGHT, buff=0.15)
-        self.play(Create(cells), run_time=0.6)
-        self.wait(0.4)
+        self.show_title("Trace")
+        nums = ArrayViz([2, 7, 11])
+        self.play(nums.intro(), run_time=0.4)
+        self.wait(0.2)
         finish_scene(self)
 '''

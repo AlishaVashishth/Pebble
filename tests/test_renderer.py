@@ -22,25 +22,37 @@ ENV = EnvInfo(
 
 TINY_SCENE = '''from manim import *
 
-config.background_color = "#0F172A"
-
 
 class Scene1_Tiny(Scene):
     def construct(self):
-        self.play(Create(Dot()), run_time=0.5)
+        nums = ArrayViz([1, 2, 3])
+        self.play(nums.intro(), run_time=0.5)
         self.wait(0.2)
         finish_scene(self)
 '''
 
 BROKEN_SCENE = '''from manim import *
 
-config.background_color = "#0F172A"
+
+class Scene1_Tiny(Scene):
+    def construct(self):
+        nums = ArrayViz([1, 2, 3])
+        self.play(nums.intro(), run_time=0.5)
+        missing_helper_that_does_not_exist()
+        finish_scene(self)
+'''
+
+# Renders fine, but two captions sit on top of each other: only the audit fails.
+OVERLAP_SCENE = '''from manim import *
 
 
 class Scene1_Tiny(Scene):
     def construct(self):
-        self.play(Create(Dot()), run_time=0.5)
-        missing_helper_that_does_not_exist()
+        nums = ArrayViz([1, 2, 3])
+        self.play(nums.intro(), run_time=0.4)
+        first = Text("two numbers", font_size=30).move_to(ORIGIN)
+        second = Text("add to target", font_size=30).move_to(ORIGIN + RIGHT * 0.2)
+        self.play(FadeIn(first), FadeIn(second), run_time=0.4)
         finish_scene(self)
 '''
 
@@ -142,6 +154,51 @@ def test_repair_that_renames_a_class_is_rejected():
     assert excinfo.value.scene_class == "Scene1_Tiny"
     assert not (workspace.root / "animation.attempt_1.py").exists()
     assert workspace.animation_path.read_text(encoding="utf-8") == BROKEN_SCENE
+
+
+def test_layout_only_failure_falls_back_to_warn_mode():
+    workspace = _job()
+    workspace.animation_path.write_text(OVERLAP_SCENE, encoding="utf-8")
+    # The fixer keeps returning the same overlapping scene: the layout problem
+    # survives the repair budget. The video must still be kept.
+    client = FakeClient([OVERLAP_SCENE])
+
+    rendered = render_scenes(
+        _result(["Scene1_Tiny"]), workspace, _settings(retries=1), ENV, client=client
+    )
+
+    assert rendered[0].video_path.exists()
+    assert rendered[0].duration > 0
+    assert rendered[0].repair_attempts == 1
+    assert rendered[0].layout_issues, "the audit findings should be recorded"
+
+
+def test_audit_fix_is_accepted_and_layout_issue_disappears():
+    workspace = _job()
+    workspace.animation_path.write_text(OVERLAP_SCENE, encoding="utf-8")
+    client = FakeClient([TINY_SCENE])
+
+    rendered = render_scenes(
+        _result(["Scene1_Tiny"]), workspace, _settings(retries=2), ENV, client=client
+    )
+
+    assert rendered[0].repairs_applied == 1
+    assert rendered[0].layout_issues == []
+    assert "LAYOUT PROBLEMS" in client.prompts[0]
+    assert "overlaps" in client.prompts[0]
+    audit = workspace.root / "audit" / "Scene1_Tiny.json"
+    assert audit.exists()
+
+
+def test_layout_audit_json_is_written_even_when_clean():
+    workspace = _job()
+    workspace.animation_path.write_text(TINY_SCENE, encoding="utf-8")
+    render_scenes(
+        _result(["Scene1_Tiny"]), workspace, _settings(), ENV, client=FakeClient([])
+    )
+    audit = workspace.root / "audit" / "Scene1_Tiny.json"
+    assert audit.exists()
+    assert audit.read_text(encoding="utf-8").find('"issues": []') != -1
 
 
 def test_strip_markdown_fences():

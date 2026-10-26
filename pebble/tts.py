@@ -82,13 +82,29 @@ def _synth_audio(text: str, voice: str, settings: Settings) -> bytes:
         return bytes(result.audio_data)
 
     if result.reason == speechsdk.ResultReason.Canceled:
-        details = speechsdk.SpeechSynthesisCancellationDetails.from_result(result)
-        raise TTSError(
-            f"Azure Speech canceled the synthesis "
-            f"({getattr(details, 'reason', 'unknown')}): {details.error_details}"
-        )
+        raise TTSError(f"Azure Speech canceled the synthesis: {_cancellation_text(result)}")
 
     raise TTSError(f"Azure Speech returned an unexpected result: {result.reason}")
+
+
+def _cancellation_text(result) -> str:
+    """Explain a canceled result without depending on one SDK's helper name."""
+    details = None
+    try:
+        import azure.cognitiveservices.speech as speechsdk
+
+        factory = getattr(speechsdk.SpeechSynthesisCancellationDetails, "from_result", None)
+        if factory is not None:
+            details = factory(result)
+        else:
+            details = speechsdk.SpeechSynthesisCancellationDetails(result)
+    except Exception:  # noqa: BLE001 - diagnostics must never mask the failure
+        details = getattr(result, "cancellation_details", None)
+
+    reason = getattr(details, "reason", None)
+    code = getattr(details, "error_code", None)
+    message = getattr(details, "error_details", "") or "no details"
+    return f"reason={reason} error_code={code}: {message}"
 
 
 def _is_permanent(error: str) -> bool:
@@ -105,7 +121,9 @@ def _synthesize_with_retries(text: str, voice: str, settings: Settings) -> bytes
             raise
         except TTSError as exc:
             last_error = str(exc)
-            if _is_permanent(last_error):
+            if _is_permanent(last_error) or "canceled the synthesis" in last_error:
+                # A cancellation is the service's verdict, not a flaky call: retrying
+                # it only burns time (and has crashed the native SDK).
                 raise
             if attempt < MAX_TRANSIENT_RETRIES:
                 logger.warning(
