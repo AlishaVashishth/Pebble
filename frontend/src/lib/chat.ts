@@ -534,6 +534,20 @@ export function saveChatSessions(sessions: ChatSession[]): void {
 }
 
 /**
+ * Clears persisted chat sessions from localStorage.
+ */
+export function clearChatSessions(): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(CHAT_STORAGE_KEY);
+      window.localStorage.removeItem('pebble_active_chat');
+    }
+  } catch {
+    // Fail silently
+  }
+}
+
+/**
 
  * Creates a new empty chat session.
 

@@ -22,32 +22,142 @@ import {
   getStoredLanguage,
   setStoredLanguage,
 } from '../components/Home/LanguageChips.tsx';
+import { getVideoJobStatus } from '../lib/video.ts';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function useChat() {
-  // Initialize with localStorage sessions for instant first paint
-  const [initialSessions] = useState<ChatSession[]>(() => {
-    const loaded = loadChatSessions();
-    loaded.forEach((s) => {
-      for (let i = 0; i < s.messages.length; i++) {
-        if (s.messages[i].role === 'assistant' && i > 0 && s.messages[i - 1].role === 'user') {
-          if (!s.messages[i].meta) s.messages[i].meta = {};
-          if (!s.messages[i].meta!.userPrompt) {
-            s.messages[i].meta!.userPrompt = s.messages[i - 1].content;
-          }
-        }
-      }
-    });
-    return loaded.length > 0 ? loaded : [createChatSession('New conversation')];
-  });
-
-  const [sessions, setSessions] = useState<ChatSession[]>(initialSessions);
-  const [activeSessionId, setActiveSessionId] = useState<string>(() => initialSessions[0]?.id ?? '');
+  // Always initialize with a fresh, empty draft session for a clean welcome state on every visit/login
+  const [initialDraft] = useState<ChatSession>(() => createChatSession('New conversation'));
+  const [sessions, setSessions] = useState<ChatSession[]>([initialDraft]);
+  const [activeSessionId, setActiveSessionId] = useState<string>(initialDraft.id);
   const [isStreaming, setIsStreaming] = useState(false);
   const [deepThink, setDeepThink] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeSessionIdRef = useRef(activeSessionId);
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  const activeVideoPollsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+
+  // Update message metadata (e.g. when video generation completes)
+  const updateMessageMeta = useCallback(
+    async (messageId: string, metaUpdates: Record<string, any>, targetSessionId?: string) => {
+      let resolvedConvId: string | null = targetSessionId || null;
+      let resolvedMsgId: string = messageId;
+
+      setSessions((prev) =>
+        prev.map((s) => {
+          const hasMsg = s.messages.some(
+            (m) =>
+              m.id === messageId ||
+              (m.meta?.video_job_id &&
+                metaUpdates.video_job_id &&
+                m.meta.video_job_id === metaUpdates.video_job_id)
+          );
+          if (!hasMsg && s.id !== activeSessionIdRef.current && s.id !== targetSessionId) {
+            return s;
+          }
+
+          if (!resolvedConvId && (s.id === targetSessionId || hasMsg)) {
+            resolvedConvId = s.id;
+          }
+
+          return {
+            ...s,
+            messages: s.messages.map((m) => {
+              const isMatch =
+                m.id === messageId ||
+                (m.meta?.video_job_id &&
+                  metaUpdates.video_job_id &&
+                  m.meta.video_job_id === metaUpdates.video_job_id);
+              if (isMatch) {
+                if (UUID_REGEX.test(m.id)) {
+                  resolvedMsgId = m.id;
+                }
+                return { ...m, meta: { ...(m.meta || {}), ...metaUpdates } };
+              }
+              return m;
+            }),
+            updatedAt: Date.now(),
+          };
+        })
+      );
+
+      const convIdToUse = resolvedConvId || activeSessionIdRef.current;
+      if (UUID_REGEX.test(convIdToUse) && UUID_REGEX.test(resolvedMsgId) && getToken()) {
+        try {
+          await updateMessageMetaApi(convIdToUse, resolvedMsgId, metaUpdates);
+        } catch (err) {
+          console.warn('Failed to update message meta on API', err);
+        }
+      }
+    },
+    []
+  );
+
+  const registerVideoJobPolling = useCallback(
+    (jobId: string, convId: string, msgId: string) => {
+      if (!jobId || activeVideoPollsRef.current.has(jobId)) return;
+
+      const pollStartTime = Date.now();
+      const interval = setInterval(async () => {
+        // Stop after 30 minutes
+        if (Date.now() - pollStartTime > 30 * 60 * 1000) {
+          clearInterval(interval);
+          activeVideoPollsRef.current.delete(jobId);
+          updateMessageMeta(
+            msgId,
+            { video_status: 'failed', video_error: 'Video generation timed out' },
+            convId
+          );
+          return;
+        }
+
+        try {
+          const statusData = await getVideoJobStatus(jobId);
+          if (statusData.status === 'completed') {
+            clearInterval(interval);
+            activeVideoPollsRef.current.delete(jobId);
+            const finalUrl = statusData.videoUrl || statusData.video_url;
+            if (finalUrl) {
+              updateMessageMeta(
+                msgId,
+                { video_url: finalUrl, video_status: 'completed', video_job_id: jobId },
+                convId
+              );
+            }
+          } else if (statusData.status === 'failed') {
+            clearInterval(interval);
+            activeVideoPollsRef.current.delete(jobId);
+            updateMessageMeta(
+              msgId,
+              {
+                video_status: 'failed',
+                video_error: statusData.error || 'Video rendering failed',
+                video_job_id: jobId,
+              },
+              convId
+            );
+          }
+        } catch (err) {
+          // Continue polling on transient errors
+        }
+      }, 3000);
+
+      activeVideoPollsRef.current.set(jobId, interval);
+    },
+    [updateMessageMeta]
+  );
+
+  useEffect(() => {
+    return () => {
+      activeVideoPollsRef.current.forEach((interval) => clearInterval(interval));
+      activeVideoPollsRef.current.clear();
+    };
+  }, []);
 
   // Helper to normalize backend messages to ChatMessage[]
   const mapApiMessages = useCallback((apiMessages: any[]): ChatMessage[] => {
@@ -93,33 +203,15 @@ export function useChat() {
             messages: [],
           }));
 
-          setSessions(remoteSessions);
-          const firstId = remoteSessions[0].id;
-          setActiveSessionId(firstId);
-
-          // Load first conversation's messages
-          try {
-            const detail = await fetchConversationDetail(firstId);
-            if (isCancelled) return;
-            const msgs = mapApiMessages(detail.messages);
-
-            setSessions((prev) =>
-              prev.map((s) =>
-                s.id === firstId
-                  ? {
-                      ...s,
-                      title: detail.title || s.title,
-                      updatedAt: new Date(detail.updated_at).getTime(),
-                      messages: msgs,
-                    }
-                  : s
-              )
-            );
-          } catch (err) {
-            console.warn('Failed to load detail for first conversation', err);
-          }
+          // Keep current fresh draft active at top; list remote sessions in sidebar without auto-selecting
+          setSessions((prev) => {
+            const currentDraft =
+              prev.find((s) => s.messages.length === 0 && !UUID_REGEX.test(s.id)) ||
+              createChatSession('New conversation');
+            return [currentDraft, ...remoteSessions];
+          });
         } else {
-          // No remote conversations: provide single empty draft
+          // No remote conversations: ensure single empty draft
           const emptyDraft = createChatSession('New conversation');
           setSessions([emptyDraft]);
           setActiveSessionId(emptyDraft.id);
@@ -202,6 +294,12 @@ export function useChat() {
                 : s
             )
           );
+
+          msgs.forEach((m) => {
+            if (m.meta?.video_job_id && !m.meta?.video_url && m.meta?.video_status !== 'failed') {
+              registerVideoJobPolling(m.meta.video_job_id, id, m.id);
+            }
+          });
         } catch (err) {
           console.warn('Failed to load conversation messages from API', err);
         }
@@ -400,6 +498,15 @@ export function useChat() {
             ...response,
             userPrompt: trimmed,
             language: preferredLang,
+            video_url: response.video_url || null,
+            video_job_id: response.video_job_id || null,
+            video_status:
+              response.video_status ||
+              (response.video_url
+                ? 'completed'
+                : response.video_job_id
+                ? 'processing'
+                : null),
           };
 
           let convId = effectiveSessionId;
@@ -423,6 +530,15 @@ export function useChat() {
                 : s
             )
           );
+
+          // If a new video job is processing, register background polling
+          if (
+            response.video_job_id &&
+            response.video_status !== 'completed' &&
+            !response.video_url
+          ) {
+            registerVideoJobPolling(response.video_job_id, convId, localAssistantMsgId);
+          }
 
           // Save assistant message to API
           if (UUID_REGEX.test(convId) && getToken()) {
@@ -464,7 +580,7 @@ export function useChat() {
         }
       }
     },
-    [activeSession]
+    [activeSession, registerVideoJobPolling]
   );
 
   // Listen for language chip re-ask event
@@ -478,36 +594,6 @@ export function useChat() {
     window.addEventListener('pebble:reask', handleReask);
     return () => window.removeEventListener('pebble:reask', handleReask);
   }, [sendMessage]);
-
-  // Update message metadata (e.g. when video generation completes)
-  const updateMessageMeta = useCallback(
-    async (messageId: string, metaUpdates: Record<string, any>) => {
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === activeSessionId
-            ? {
-                ...s,
-                messages: s.messages.map((m) =>
-                  m.id === messageId
-                    ? { ...m, meta: { ...(m.meta || {}), ...metaUpdates } }
-                    : m
-                ),
-                updatedAt: Date.now(),
-              }
-            : s
-        )
-      );
-
-      if (UUID_REGEX.test(activeSessionId) && UUID_REGEX.test(messageId) && getToken()) {
-        try {
-          await updateMessageMetaApi(activeSessionId, messageId, metaUpdates);
-        } catch (err) {
-          console.warn('Failed to update message meta on API', err);
-        }
-      }
-    },
-    [activeSessionId]
-  );
 
   return {
     sessions,

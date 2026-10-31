@@ -16,8 +16,20 @@ export interface CreateVideoJobRequest {
 
 export interface VideoJobResponse {
   id: string;
-  status: 'queued' | 'running' | 'completed' | 'failed';
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'processing';
   stage: string;
+  video_url?: string | null;
+  videoUrl?: string | null;
+  error?: string | null;
+  queue_position?: number | null;
+  elapsed_seconds?: number | null;
+}
+
+export interface VideoJobStatusResponse {
+  id: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  stage?: string;
+  videoUrl?: string | null;
   video_url?: string | null;
   error?: string | null;
   queue_position?: number | null;
@@ -40,6 +52,10 @@ export async function createVideoJob(videoRequest: CreateVideoJobRequest): Promi
 
 export async function getVideoJob(id: string): Promise<VideoJobResponse> {
   return request<VideoJobResponse>(`/video-jobs/${id}`);
+}
+
+export async function getVideoJobStatus(id: string): Promise<VideoJobStatusResponse> {
+  return request<VideoJobStatusResponse>(`/video-jobs/${id}/status`);
 }
 
 export async function getVideoResult(id: string): Promise<VideoResultResponse> {

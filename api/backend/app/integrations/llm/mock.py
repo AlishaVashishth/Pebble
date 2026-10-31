@@ -62,6 +62,15 @@ class MockLLMProvider(LLMProvider):
             elif re.search(r"\b(?:in\s+python|python\s+version)\b", lower_prompt):
                 detected_lang = "python"
 
+        # Check for code snippets
+        if "```" in user_prompt or "for " in lower_prompt and "in " in lower_prompt or "text[::-1]" in user_prompt or "bubblesort" in lower_prompt:
+            return json.dumps({
+                "intent": "user_code",
+                "clean_title": None,
+                "reply": "Pebble will analyze your code and generate an explanation video.",
+                "programming_language": detected_lang or "python",
+            })
+
         # Check for greetings / chitchat
         if any(w in lower_prompt for w in ("hello", "hi", "hey", "good morning", "how are you")):
             return json.dumps({
@@ -72,26 +81,43 @@ class MockLLMProvider(LLMProvider):
             })
 
         # Check for off-topic queries
-        if any(w in lower_prompt for w in ("weather", "recipe", "cook", "pizza", "movie", "politics", "football")):
+        if any(w in lower_prompt for w in ("weather", "recipe", "cook", "pizza", "movie", "politics", "football", "holiday")):
             return json.dumps({
                 "intent": "off_topic",
                 "clean_title": None,
-                "reply": "I specialize in data structures and algorithms. Please ask a DSA-related question.",
+                "reply": "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, a topic like arrays, trees or graphs, or paste your own code.",
+                "programming_language": detected_lang,
+            })
+
+        # Check for described problems
+        if "merge two sorted arrays" in lower_prompt or "merge sorted arrays" in lower_prompt:
+            return json.dumps({
+                "intent": "described_problem",
+                "clean_title": "Merge Two Sorted Arrays",
+                "reply": "Pebble will generate an explanation for merging two sorted arrays.",
                 "programming_language": detected_lang,
             })
 
         # Check for specific problems
         if "two sum" in lower_prompt or "problem 1" in lower_prompt:
             return json.dumps({
-                "intent": "dsa_problem",
+                "intent": "repo_question",
                 "clean_title": "Two Sum",
+                "reply": "Found matching DSA problem.",
+                "programming_language": detected_lang,
+            })
+
+        if "leetcode 56" in lower_prompt or "merge intervals" in lower_prompt:
+            return json.dumps({
+                "intent": "repo_question",
+                "clean_title": "Merge Intervals",
                 "reply": "Found matching DSA problem.",
                 "programming_language": detected_lang,
             })
 
         if "reverse linked list" in lower_prompt:
             return json.dumps({
-                "intent": "dsa_problem",
+                "intent": "repo_question",
                 "clean_title": "Reverse Linked List",
                 "reply": "Found matching DSA problem.",
                 "programming_language": detected_lang,
@@ -105,7 +131,15 @@ class MockLLMProvider(LLMProvider):
                 "programming_language": detected_lang,
             })
 
-        # Check for algorithm concepts
+        # Check for algorithm concepts / topic requests
+        if "binary search tree" in lower_prompt or "binary search trees" in lower_prompt or "bst" in lower_prompt:
+            return json.dumps({
+                "intent": "topic_request",
+                "clean_title": "Binary Search Trees",
+                "reply": "Pebble will generate an explanation for binary search trees.",
+                "programming_language": detected_lang,
+            })
+
         if "binary search" in lower_prompt:
             return json.dumps({
                 "intent": "algorithm_concept",

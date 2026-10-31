@@ -158,13 +158,8 @@ def test_successful_run_uploads_and_cleans_up(tmp_path, monkeypatch):
     assert result_doc["duration_seconds"] == 42.5
     assert result_doc["solution"]["code"].startswith("class Solution")
 
-    # Heavy scratch folders are gone; the small artefacts and log remain.
-    for name in ("media", "scenes", "audio", "muxed", "frames", "render_logs"):
-        assert not (workspace / name).exists(), name
-    for name in ("animation.py", "generation.json", "result.json", "metadata.json"):
-        assert (workspace / name).exists(), name
-    assert (workspace / "pipeline.log").exists()
-    assert (workspace / "final.mp4").exists()
+    # The full workspace folder is deleted after a successful upload
+    assert not workspace.exists()
 
 
 def test_keep_workspace_env_disables_cleanup(tmp_path, monkeypatch):

@@ -249,19 +249,24 @@ def _width_for(at, default: float | None) -> float | None:
 
 
 def _clamp_into_frame(mob, margin: float = EDGE_MARGIN):
-    """Shift a finished structure so no part of it is clipped by the frame."""
+    """Shift a finished structure so no part of it is clipped by the safe area/frame."""
     dx = 0.0
     dy = 0.0
     left, right = mob.get_left()[0], mob.get_right()[0]
     bottom, top = mob.get_bottom()[1], mob.get_top()[1]
-    if left < -FRAME_HALF_W + margin:
-        dx = -FRAME_HALF_W + margin - left
-    elif right > FRAME_HALF_W - margin:
-        dx = FRAME_HALF_W - margin - right
-    if bottom < -FRAME_HALF_H + margin:
-        dy = -FRAME_HALF_H + margin - bottom
-    elif top > FRAME_HALF_H - margin:
-        dy = FRAME_HALF_H - margin - top
+    min_x = max(-FRAME_HALF_W + margin, -SAFE_WIDTH / 2 + 0.05)
+    max_x = min(FRAME_HALF_W - margin, SAFE_WIDTH / 2 - 0.05)
+    min_y = max(-FRAME_HALF_H + margin, -SAFE_HEIGHT / 2 + 0.05)
+    max_y = min(FRAME_HALF_H - margin, SAFE_HEIGHT / 2 - 0.05)
+
+    if left < min_x:
+        dx = min_x - left
+    elif right > max_x:
+        dx = max_x - right
+    if bottom < min_y:
+        dy = min_y - bottom
+    elif top > max_y:
+        dy = max_y - top
     if dx or dy:
         mob.shift(np.array([dx, dy, 0.0]))
     return mob
@@ -269,6 +274,19 @@ def _clamp_into_frame(mob, margin: float = EDGE_MARGIN):
 
 def _settle(mob, at, max_width=None, max_height=None):
     """Fit, place at ``at`` and keep the result inside the visible frame."""
+    if at is not None and len(_STRUCTURES) >= 1:
+        prev = _STRUCTURES[-1]
+        try:
+            at_x = float(at[0])
+            prev_x = float(prev.get_center()[0])
+            if abs(at_x) < 1.0 and abs(prev_x) < 1.0:
+                # Automatic lane placement to prevent overlap between multiple structures
+                prev.move_to(LEFT_LANE)
+                _clamp_into_frame(prev)
+                at = RIGHT_LANE
+                max_width = min(max_width or LANE_WIDTH, LANE_WIDTH)
+        except Exception:
+            pass
     _fit(mob, _width_for(at, max_width), max_height)
     if at is not None:
         mob.move_to(at)
@@ -546,6 +564,68 @@ class ArrayViz(_IntroMixin, VGroup):
             Indicate(new_right, color=C_TEXT, scale_factor=1.08),
             lag_ratio=0,
         )
+
+    def append(self, value):
+        cell_w = self.cells[0].width if self.cells else 1.0
+        cell_h = self.cells[0].height if self.cells else 1.0
+        style = _style("default")
+        rect = RoundedRectangle(
+            corner_radius=0.12,
+            width=cell_w,
+            height=cell_h,
+            fill_color=style["fill"],
+            fill_opacity=style["fill_opacity"],
+            stroke_color=style["stroke"],
+            stroke_width=style["stroke_width"],
+        )
+        if self.cells:
+            rect.next_to(self.cells[-1], RIGHT, buff=0.12)
+        else:
+            rect.move_to(self.get_center())
+
+        self.values.append(value)
+        self.cells.append(rect)
+        self.row.add(rect)
+        self.body.add(rect)
+        self.add(rect)
+
+        text = _text(value, size=32).move_to(rect.get_center())
+        self.value_texts.append(text)
+        self.body.add(text)
+        self.add(text)
+
+        anims = [FadeIn(rect, shift=RIGHT * 0.2), FadeIn(text, shift=RIGHT * 0.2), _state_anim(rect, "active")]
+
+        if self.show_index:
+            pos = len(self.values) - 1
+            idx_label = _text(pos, size=20, color=C_MUTED)
+            idx_label.move_to(
+                np.array([rect.get_center()[0], rect.get_bottom()[1] - 0.3, 0.0])
+            )
+            self.index_labels.append(idx_label)
+            self.body.add(idx_label)
+            self.add(idx_label)
+            anims.append(FadeIn(idx_label))
+
+        return AnimationGroup(*anims, lag_ratio=0)
+
+    def pop(self, index: int = -1):
+        if not self.values:
+            raise ValueError("ArrayViz is empty; nothing to pop")
+        if index < 0:
+            index = len(self.values) + index
+        _check_index(index, len(self.cells), "pop index")
+
+        val = self.values.pop(index)
+        rect = self.cells.pop(index)
+        text = self.value_texts.pop(index)
+        anims = [FadeOut(rect, shift=DOWN * 0.2), FadeOut(text, shift=DOWN * 0.2)]
+
+        if self.show_index and self.index_labels:
+            idx_label = self.index_labels.pop()
+            anims.append(FadeOut(idx_label))
+
+        return AnimationGroup(*anims, lag_ratio=0)
 
     # -- pointers -------------------------------------------------------
     def pointer(self, name: str, index: int, state: str = "active", level: int = 0) -> Pointer:
@@ -1145,6 +1225,10 @@ class StackViz(_IntroMixin, VGroup):
             raise ValueError("stack is empty; nothing to peek")
         return Indicate(self.items[0], color=C_TEXT, scale_factor=1.05)
 
+    def append(self, value):
+        """Natural alias for push."""
+        return self.push(value)
+
 
 class QueueViz(_IntroMixin, VGroup):
     """A horizontal queue (or deque) with front/back labels."""
@@ -1277,6 +1361,26 @@ class QueueViz(_IntroMixin, VGroup):
             raise ValueError("deque is empty; nothing to pop_back")
         group = self.items.pop()
         return FadeOut(group, shift=RIGHT * 0.4)
+
+    def push(self, value):
+        """Natural alias for enqueue."""
+        return self.enqueue(value)
+
+    def pop(self):
+        """Natural alias for dequeue."""
+        return self.dequeue()
+
+    def append(self, value):
+        """Natural alias for enqueue."""
+        return self.enqueue(value)
+
+    def popleft(self):
+        """Natural alias for dequeue (deque-style)."""
+        return self.dequeue()
+
+    def appendleft(self, value):
+        """Natural alias for push_front (deque-style)."""
+        return self.push_front(value)
 
 
 # ---------------------------------------------------------------------------
@@ -2209,11 +2313,23 @@ def _caption_mobject(value: str, max_width: float):
 
 def set_caption(scene, text: str):
     """One-line caption at the bottom; crossfades the previous caption."""
+    cleaned = " ".join(str(text).split())
+    if len(cleaned) > 70:
+        cutoff = 67
+        truncated = cleaned[:cutoff]
+        if " " in truncated:
+            truncated = truncated.rsplit(" ", 1)[0]
+        text = truncated + "..."
+    else:
+        text = cleaned
+
     legend = bool(getattr(scene, "_pebble_legend", False))
     max_width = 8.2 if legend else 11.6
     caption = _caption_mobject(text, max_width)
     x = -1.4 if legend else 0.0
     caption.move_to(np.array([x, CAPTION_Y, 0.0]))
+    if caption.get_bottom()[1] < -SAFE_HEIGHT / 2 + 0.1:
+        caption.shift(UP * (-SAFE_HEIGHT / 2 + 0.1 - caption.get_bottom()[1]))
     old = getattr(scene, "_pebble_caption", None)
     scene._pebble_caption = caption
     _reserve(caption)

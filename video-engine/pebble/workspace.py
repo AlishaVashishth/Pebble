@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 from pathlib import Path
 
@@ -17,15 +18,26 @@ SUBFOLDERS = (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
+
+
+def get_workspace_root() -> Path:
+    """Return configured workspace directory via PEBBLE_WORKSPACE_DIR or default."""
+    custom = os.environ.get("PEBBLE_WORKSPACE_DIR")
+    if custom and custom.strip():
+        return Path(custom.strip()).resolve()
+    return (PROJECT_ROOT / "workspace").resolve()
+
+
+WORKSPACE_ROOT = get_workspace_root()
 
 
 class JobWorkspace:
     """File layout for one generation job."""
 
-    def __init__(self, job_id: str | None = None) -> None:
+    def __init__(self, job_id: str | None = None, root_dir: Path | None = None) -> None:
         self.job_id = job_id or f"job_{secrets.token_hex(4)}"
-        self.root = WORKSPACE_ROOT / self.job_id
+        base = Path(root_dir) if root_dir is not None else get_workspace_root()
+        self.root = base / self.job_id
         for name in SUBFOLDERS:
             (self.root / name).mkdir(parents=True, exist_ok=True)
 

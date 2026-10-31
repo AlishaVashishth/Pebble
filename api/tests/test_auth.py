@@ -1,9 +1,82 @@
 """Tests for authentication endpoints and security behaviors."""
 
 import pytest
-from fastapi import status
+from fastapi import HTTPException, status
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+from backend.app.core.exceptions import format_validation_error
+from backend.app.db.base import Base
 from backend.app.repositories.user_repository import UserRepository
+from backend.app.schemas.auth import UserLoginRequest, UserRegisterRequest
+from backend.app.services.auth_service import AuthService
+
+
+@pytest.fixture
+def sqlite_auth_session():
+    """In-memory SQLite session for isolated auth unit tests."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session = Session(bind=engine)
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_auth_service_duplicate_email_409(sqlite_auth_session: Session):
+    """Registering duplicate email raises 409 with exact detail message."""
+    service = AuthService()
+    req = UserRegisterRequest(name="Alice", email="alice@example.com", password="Password123!")
+    service.register(sqlite_auth_session, req)
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.register(sqlite_auth_session, req)
+    assert exc_info.value.status_code == status.HTTP_409_CONFLICT
+    assert exc_info.value.detail == "This email is already registered. Try logging in."
+
+
+def test_auth_service_login_wrong_password_401(sqlite_auth_session: Session):
+    """Wrong password raises 401 with uniform detail message."""
+    service = AuthService()
+    req = UserRegisterRequest(name="Bob", email="bob@example.com", password="CorrectPassword123!")
+    service.register(sqlite_auth_session, req)
+
+    with pytest.raises(HTTPException) as exc_info:
+        service.login(sqlite_auth_session, UserLoginRequest(email="bob@example.com", password="WrongPassword999!"))
+    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert exc_info.value.detail == "Incorrect email or password."
+
+
+def test_auth_service_login_unknown_email_401(sqlite_auth_session: Session):
+    """Unknown email raises 401 with identical message to wrong password."""
+    service = AuthService()
+    with pytest.raises(HTTPException) as exc_info:
+        service.login(sqlite_auth_session, UserLoginRequest(email="nobody@example.com", password="AnyPassword123!"))
+    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
+    assert exc_info.value.detail == "Incorrect email or password."
+
+
+def test_format_validation_error_short_password():
+    """Short password is formatted into a clean user-facing error message."""
+    try:
+        UserRegisterRequest(name="Charlie", email="charlie@example.com", password="short")
+    except ValidationError as val_err:
+        req_err = RequestValidationError(val_err.errors())
+        formatted = format_validation_error(req_err)
+        assert formatted == "Password must be at least 8 characters."
+
+
+def test_format_validation_error_invalid_email():
+    """Invalid email is formatted into a clean user-facing error message."""
+    try:
+        UserRegisterRequest(name="Charlie", email="notanemail", password="ValidPassword123!")
+    except ValidationError as val_err:
+        req_err = RequestValidationError(val_err.errors())
+        formatted = format_validation_error(req_err)
+        assert formatted == "Please enter a valid email address."
 
 
 @pytest.mark.db
@@ -45,7 +118,7 @@ def test_register_duplicate_email_409(client):
 
     resp2 = client.post("/auth/register", json=payload)
     assert resp2.status_code == status.HTTP_409_CONFLICT
-    assert "already exists" in resp2.json()["message"].lower() or "already exists" in resp2.text.lower()
+    assert "already registered" in resp2.json().get("detail", "").lower() or "already registered" in resp2.text.lower()
 
 
 @pytest.mark.db
@@ -93,9 +166,10 @@ def test_login_wrong_password_and_unknown_email_same_message(client):
 
     # Ensure both return the identical error message to avoid enumeration
     assert wrong_pw_msg == unknown_email_msg
-    assert "invalid email or password" in wrong_pw_msg.lower()
+    assert "incorrect email or password" in wrong_pw_msg.lower()
 
 
+@pytest.mark.db
 @pytest.mark.db
 def test_login_rate_limit_429(client):
     """Login rate limit returns 429 after 5 attempts per minute."""
@@ -109,12 +183,14 @@ def test_login_rate_limit_429(client):
     assert blocked_resp.status_code == status.HTTP_429_TOO_MANY_REQUESTS
 
 
+@pytest.mark.db
 def test_auth_no_token_401(client):
     """Accessing protected endpoint without a token returns 401 Unauthorized."""
     resp = client.get("/users/me")
     assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
 
+@pytest.mark.db
 def test_auth_garbage_token_401(client):
     """Accessing protected endpoint with garbage token returns 401 Unauthorized."""
     resp = client.get("/users/me", headers={"Authorization": "Bearer not.a.valid.jwt.token"})

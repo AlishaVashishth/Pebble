@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 OUT_OF_SCOPE_MESSAGE = (
     "Sorry, I can only help with data structures and algorithms. "
-    "Try a LeetCode number, a problem name, or a topic like arrays, trees or graphs."
+    "Try a LeetCode number, a problem name, a topic like arrays, trees or graphs, or paste your own code."
 )
 
 
@@ -428,6 +428,7 @@ class VideoService:
             blob_name = status_data.get("blob_name")
             error_val = status_data.get("error")
             returned_sol = status_data.get("solution")
+            fallback_scenes = status_data.get("fallback_scenes") or []
 
             should_close = False
             session = db or get_db_session()
@@ -459,7 +460,7 @@ class VideoService:
                             stage="completed",
                             completed_at=datetime.now(timezone.utc),
                         )
-                        if video_url and blob_name:
+                        if video_url and blob_name and not fallback_scenes:
                             existing = self.video_repo.get_completed_video_by_cache_key(session, cache_key)
                             if not existing:
                                 self.video_repo.create_generated_video(
@@ -473,6 +474,28 @@ class VideoService:
                             elif solution_json and not existing.solution_json:
                                 existing.solution_json = solution_json
                                 session.flush()
+                        elif fallback_scenes:
+                            logger.warning(
+                                "Job %s completed with fallback scenes %s; not caching in generated_videos table",
+                                job_id,
+                                fallback_scenes,
+                            )
+
+                            # Backfill video_url into stored conversation messages referencing this job
+                            try:
+                                from backend.app.models.conversation import Message
+                                msg_stmt = select(Message).where(Message.meta.is_not(None))
+                                stored_msgs = session.scalars(msg_stmt).all()
+                                for msg in stored_msgs:
+                                    if isinstance(msg.meta, dict) and msg.meta.get("video_job_id") == str(job_uuid):
+                                        updated_meta = dict(msg.meta)
+                                        updated_meta["video_url"] = video_url
+                                        updated_meta["video_status"] = "completed"
+                                        msg.meta = updated_meta
+                                        session.add(msg)
+                            except Exception as backfill_err:
+                                logger.warning("Could not backfill conversation message with video_url: %s", backfill_err)
+
                         session.commit()
                         break
 
@@ -484,6 +507,21 @@ class VideoService:
                             stage="failed",
                             error_code=error_val or "render_failed",
                         )
+                        # Backfill failed status into stored conversation messages
+                        try:
+                            from backend.app.models.conversation import Message
+                            msg_stmt = select(Message).where(Message.meta.is_not(None))
+                            stored_msgs = session.scalars(msg_stmt).all()
+                            for msg in stored_msgs:
+                                if isinstance(msg.meta, dict) and msg.meta.get("video_job_id") == str(job_uuid):
+                                    updated_meta = dict(msg.meta)
+                                    updated_meta["video_status"] = "failed"
+                                    updated_meta["video_error"] = error_val or "render_failed"
+                                    msg.meta = updated_meta
+                                    session.add(msg)
+                        except Exception as backfill_err:
+                            logger.warning("Could not backfill failed status into message: %s", backfill_err)
+
                         session.commit()
                         break
 

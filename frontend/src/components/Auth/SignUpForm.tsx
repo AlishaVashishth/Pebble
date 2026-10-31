@@ -11,6 +11,8 @@ interface SignUpFormProps {
   onSwitchToLogIn: () => void;
   onGoogleSignIn: () => void;
   isGoogleLoading?: boolean;
+  externalError?: string | null;
+  onClearExternalError?: () => void;
   onTriggerShake: () => void;
   onHoverStart?: (type?: string) => void;
   onHoverEnd?: () => void;
@@ -21,6 +23,8 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
   onSwitchToLogIn,
   onGoogleSignIn,
   isGoogleLoading = false,
+  externalError = null,
+  onClearExternalError,
   onTriggerShake,
   onHoverStart,
   onHoverEnd,
@@ -35,7 +39,9 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [serverError, setServerError] = useState<{ message: string; is409?: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const displayedError = error || externalError;
 
   const nameRef = useRef<HTMLInputElement | null>(null);
   const emailRef = useRef<HTMLInputElement | null>(null);
@@ -71,11 +77,8 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
   const handleChange = (field: keyof typeof formData) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setFormData((prev) => ({ ...prev, [field]: val }));
-    setServerError(null);
-
-    if (field === 'email' && errors.email === "You are already registered with this email. Please log in.") {
-      setErrors((prev) => ({ ...prev, email: '' }));
-    }
+    setError(null);
+    onClearExternalError?.();
 
     if (touched[field]) {
       const err = validateField(field, val);
@@ -99,7 +102,8 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setServerError(null);
+    setError(null);
+    onClearExternalError?.();
 
     const newErrors: Record<string, string> = {};
     (['name', 'email', 'password', 'confirmPassword'] as const).forEach((f) => {
@@ -138,16 +142,12 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
       };
       const res = await signUp(params);
       onSuccess(res.user.name);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        const msg = "You are already registered with this email. Please log in.";
-        setErrors((prev) => ({ ...prev, email: msg }));
-        setTouched((prev) => ({ ...prev, email: true }));
-        setServerError({ message: msg, is409: true });
-      } else {
-        const msg = err instanceof Error && err.message ? err.message : authContent.errors.genericFailure;
-        setServerError({ message: msg, is409: false });
+    } catch (err: any) {
+      if (import.meta.env.DEV) {
+        console.error('Sign up error:', err);
       }
+      const msg = err?.message || authContent.errors.genericFailure;
+      setError(msg);
       onTriggerShake();
     } finally {
       setIsSubmitting(false);
@@ -160,26 +160,6 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
 
   return (
     <form onSubmit={handleSubmit} className="w-full flex flex-col gap-3" noValidate>
-      {/* Red Error Banner */}
-      {serverError && (
-        <div
-          role="alert"
-          className="w-full rounded-[12px] bg-[#D9485F]/10 border border-[#D9485F]/25 px-3.5 py-2.5 text-[13px] text-[#D9485F] flex items-center justify-between gap-2"
-        >
-          <div className="flex-1 leading-snug">
-            <span>{serverError.message}</span>
-            {serverError.is409 && (
-              <button
-                type="button"
-                onClick={onSwitchToLogIn}
-                className="ml-1.5 underline font-semibold text-[#D9485F] hover:text-[#B82D44] cursor-pointer inline-flex items-center"
-              >
-                Log in
-              </button>
-            )}
-          </div>
-        </div>
-      )}
       {/* 4 Fields with 12px gap */}
       <TextField
         ref={nameRef}
@@ -241,7 +221,31 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
         onHoverEnd={onHoverEnd}
       />
 
-      {/* Generic Error Notice */}
+      {/* Red Error Alert near submit button */}
+      {displayedError && (
+        <div
+          role="alert"
+          className="w-full rounded-[12px] bg-[#D9485F]/10 border border-[#D9485F]/25 px-3.5 py-2.5 text-[13px] text-[#D9485F] flex items-center justify-between gap-2 leading-snug"
+        >
+          <div className="flex-1">
+            <span>{displayedError}</span>
+            {displayedError.toLowerCase().includes('already registered') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  onClearExternalError?.();
+                  onSwitchToLogIn();
+                }}
+                className="ml-1.5 underline font-semibold text-[#D9485F] hover:text-[#B82D44] cursor-pointer inline-flex items-center"
+              >
+                Log in
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Primary Submit Button: Solid near-black #111113 */}
       <button
         type="submit"
@@ -299,7 +303,11 @@ export const SignUpForm: React.FC<SignUpFormProps> = ({
           {authContent.footer.signup.switchPrompt}{' '}
           <button
             type="button"
-            onClick={onSwitchToLogIn}
+            onClick={() => {
+              setError(null);
+              onClearExternalError?.();
+              onSwitchToLogIn();
+            }}
             onMouseEnter={() => onHoverStart?.('button')}
             onMouseLeave={onHoverEnd}
             className="text-[#111113] font-semibold hover:underline transition-colors focus:outline-none"

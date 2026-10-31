@@ -60,3 +60,6 @@ class AskResponse(BaseModel):
     can_generate: bool
     video_request: Optional[CreateVideoJobRequest] = None
     video_payload: Optional[Dict[str, Any]] = None
+    video_job_id: Optional[str] = None
+    video_status: Optional[str] = None
+    video_url: Optional[str] = None

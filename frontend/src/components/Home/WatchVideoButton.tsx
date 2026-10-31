@@ -4,6 +4,7 @@ import {
   CreateVideoJobRequest,
   createVideoJob,
   getVideoJob,
+  getVideoJobStatus,
   getVideoResult,
   retryVideoJob,
 } from '../../lib/video.ts';
@@ -13,7 +14,8 @@ interface WatchVideoButtonProps {
   videoRequest: CreateVideoJobRequest;
   initialVideoUrl?: string | null;
   initialJobId?: string | null;
-  onMetaUpdate?: (metaUpdates: { video_job_id?: string; video_url?: string }) => void;
+  initialStatus?: string | null;
+  onMetaUpdate?: (metaUpdates: { video_job_id?: string; video_url?: string; video_status?: string; video_error?: string }) => void;
 }
 
 type JobState = 'idle' | 'queued' | 'running' | 'completed' | 'failed';
@@ -22,12 +24,19 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
   videoRequest,
   initialVideoUrl,
   initialJobId,
+  initialStatus,
   onMetaUpdate,
 }) => {
-  // If video was already completed, show immediately with no waiting
-  const [status, setStatus] = useState<JobState>(() =>
-    initialVideoUrl ? 'completed' : 'idle'
-  );
+  const computeInitialStatus = (): JobState => {
+    if (initialVideoUrl) return 'completed';
+    if (initialStatus === 'failed') return 'failed';
+    if (initialStatus === 'queued') return 'queued';
+    if (initialStatus === 'processing' || initialStatus === 'running') return 'running';
+    if (initialJobId) return 'running';
+    return 'idle';
+  };
+
+  const [status, setStatus] = useState<JobState>(computeInitialStatus);
   const [videoUrl, setVideoUrl] = useState<string | null>(initialVideoUrl || null);
   const [jobId, setJobId] = useState<string | null>(initialJobId || null);
   const [stage, setStage] = useState<string>('');
@@ -54,6 +63,28 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
     };
   }, []);
 
+  // Sync props to state and auto-start polling if job is active
+  useEffect(() => {
+    if (initialVideoUrl) {
+      setVideoUrl(initialVideoUrl);
+      setStatus('completed');
+      stopPolling();
+    } else if (initialJobId) {
+      setJobId(initialJobId);
+      if (initialStatus === 'failed') {
+        setStatus('failed');
+        stopPolling();
+      } else if (initialStatus === 'completed' && initialVideoUrl) {
+        setStatus('completed');
+        stopPolling();
+      } else {
+        const nextStatus = initialStatus === 'queued' ? 'queued' : 'running';
+        setStatus(nextStatus);
+        startPolling(initialJobId);
+      }
+    }
+  }, [initialVideoUrl, initialJobId, initialStatus]);
+
   const getFriendlyErrorMessage = (err: unknown): string => {
     if (err instanceof ApiError) {
       if (err.status === 503) {
@@ -75,10 +106,11 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
     setStatus('completed');
     setErrorMessage(null);
 
-    // Save video_job_id and video_url back into message meta
+    // Save video_job_id, video_url, and video_status back into message meta
     onMetaUpdate?.({
       video_job_id: id,
       video_url: completedUrl,
+      video_status: 'completed',
     });
   };
 
@@ -98,15 +130,20 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
         stopPolling();
         setStatus('failed');
         setErrorMessage('Video generation timed out after 30 minutes. Please retry.');
+        onMetaUpdate?.({
+          video_job_id: targetJobId,
+          video_status: 'failed',
+          video_error: 'Video generation timed out after 30 minutes. Please retry.',
+        });
         return;
       }
 
       try {
-        const job = await getVideoJob(targetJobId);
+        const job = await getVideoJobStatus(targetJobId);
         if (!isMountedRef.current) return;
 
         if (job.status === 'completed') {
-          let finalUrl = job.video_url;
+          let finalUrl = job.videoUrl || job.video_url;
           if (!finalUrl) {
             try {
               const res = await getVideoResult(targetJobId);
@@ -126,11 +163,16 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
           stopPolling();
           setStatus('failed');
           setErrorMessage(job.error || 'Video rendering failed.');
+          onMetaUpdate?.({
+            video_job_id: targetJobId,
+            video_status: 'failed',
+            video_error: job.error || 'Video rendering failed.',
+          });
         } else if (job.status === 'queued') {
           setStatus('queued');
           setQueuePosition(job.queue_position ?? null);
           setStage(job.stage || 'In queue');
-        } else if (job.status === 'running') {
+        } else if (job.status === 'processing' || (job as any).status === 'running') {
           setStatus('running');
           setStage(job.stage || 'Rendering frames');
         }
@@ -145,7 +187,7 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
           setErrorMessage(getFriendlyErrorMessage(err));
         }
       }
-    }, 5000);
+    }, 3000);
   };
 
   const handleStartGeneration = async () => {
@@ -241,7 +283,7 @@ export const WatchVideoButton: React.FC<WatchVideoButtonProps> = ({
             <span className="text-xs font-semibold text-[#111113]">
               {status === 'queued'
                 ? `Queued for video rendering${queuePosition !== null ? ` (Position #${queuePosition})` : ''}`
-                : 'Generating Algorithm Video'}
+                : 'Generating video...'}
             </span>
             <span className="text-[11px] text-[#8A8A90] font-mono mt-0.5">
               {stage || (status === 'queued' ? 'Waiting in line...' : 'Processing video frames...')}

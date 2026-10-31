@@ -385,7 +385,11 @@ def create_app() -> FastAPI:
         job = runtime.store.get(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
-        return _job_response(job)
+        resp = _job_response(job)
+        if job.get("status") == STATUS_COMPLETED:
+            meta = _job_metadata(runtime, job)
+            resp["fallback_scenes"] = meta.get("fallback_scenes") or []
+        return resp
 
     @app.get("/video-status/{job_id}/details", dependencies=[Depends(require_api_key)])
     def video_details(job_id: str) -> dict[str, Any]:

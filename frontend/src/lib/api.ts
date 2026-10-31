@@ -6,32 +6,47 @@
 
    export class ApiError extends Error {
      status: number;
-     constructor(message: string, status: number) {
-       super(message); this.name = 'ApiError'; this.status = status;
+     data?: any;
+     constructor(message: string, status: number, data?: any) {
+       super(message); this.name = 'ApiError'; this.status = status; this.data = data;
      }
    }
 
    export const getToken = () => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } };
    export const setToken = (t: string) => { try { localStorage.setItem(TOKEN_KEY, t); } catch {} };
    export const clearStoredAuth = () => {
-     try { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY); } catch {}
+     try {
+       localStorage.removeItem(TOKEN_KEY);
+       localStorage.removeItem(USER_KEY);
+       localStorage.removeItem('pebble_chats');
+       localStorage.removeItem('pebble_active_chat');
+     } catch {}
    };
 
-   function friendlyMessage(status: number, data: any): string {
-     const msg = typeof data?.message === 'string' ? data.message
-               : typeof data?.detail === 'string' ? data.detail : '';
-     if (status >= 500 && data === null)
-       return "Can't reach the pebble server. Check that the backend is running.";
-     switch (status) {
-       case 401: return /invalid email or password/i.test(msg)
-         ? 'Incorrect email or password.' : 'Your session has expired. Please log in again.';
-       case 409: return 'An account with this email already exists. Try logging in instead.';
-       case 422: return 'Please check the details you entered and try again.';
-       case 429: return 'Too many attempts. Please wait a minute and try again.';
-       default: return status >= 500
-         ? 'The server ran into a problem. Please try again in a moment.'
-         : msg || 'Something went wrong. Please try again.';
+   export function extractErrorMessage(data: any): string {
+     if (typeof data?.detail === 'string' && data.detail.trim()) {
+       return data.detail.trim();
      }
+     if (Array.isArray(data?.detail) && data.detail.length > 0) {
+       const msgs = data.detail
+         .map((item: any) => {
+           if (typeof item === 'string') return item.trim();
+           if (typeof item?.msg === 'string') {
+             let m = item.msg.trim();
+             if (m.startsWith('Value error, ')) m = m.slice('Value error, '.length);
+             return m;
+           }
+           return '';
+         })
+         .filter(Boolean);
+       if (msgs.length > 0) {
+         return msgs.join('. ');
+       }
+     }
+     if (typeof data?.message === 'string' && data.message.trim()) {
+       return data.message.trim();
+     }
+     return 'Something went wrong. Please try again.';
    }
 
    export async function request<T>(
@@ -51,7 +66,7 @@
        });
      } catch (err) {
        if ((err as any)?.name === 'AbortError') throw err;
-       throw new ApiError("Can't reach the pebble server. Check that the backend is running.", 0);
+       throw new Error('Cannot reach the server. Please check your connection and try again.');
      }
 
      let data: any = null;
@@ -63,7 +78,11 @@
          clearStoredAuth();
          window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
        }
-       throw new ApiError(friendlyMessage(res.status, data), res.status);
+       const message = extractErrorMessage(data);
+       const error = new Error(message);
+       (error as any).status = res.status;
+       (error as any).data = data;
+       throw error;
      }
      return data as T;
    }

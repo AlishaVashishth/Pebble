@@ -128,7 +128,7 @@ def test_ask_out_of_scope_status(client, seeded_db, auth_headers):
     assert data["status"] == "out_of_scope"
     assert (
         data["message"]
-        == "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, or a topic like arrays, trees or graphs."
+        == "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, a topic like arrays, trees or graphs, or paste your own code."
     )
     assert data["can_generate"] is False
     assert data["problem"] is None
@@ -145,7 +145,7 @@ def test_ask_hello_out_of_scope(client, seeded_db, auth_headers):
     assert data["status"] == "out_of_scope"
     assert (
         data["message"]
-        == "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, or a topic like arrays, trees or graphs."
+        == "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, a topic like arrays, trees or graphs, or paste your own code."
     )
     assert data["can_generate"] is False
 
@@ -257,7 +257,7 @@ def test_ask_prompt_injection_rejected(client, seeded_db, auth_headers):
         assert data["status"] == "out_of_scope"
         assert (
             data["message"]
-            == "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, or a topic like arrays, trees or graphs."
+            == "Sorry, I can only help with data structures and algorithms. Try a LeetCode number, a problem name, a topic like arrays, trees or graphs, or paste your own code."
         )
         assert data["can_generate"] is False
 

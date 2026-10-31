@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pebble.environment import EnvInfo
 from pebble.errors import ConfigError
+from pebble.kit_api import get_allowed_api_reference
 from pebble.models import (
     REQUEST_KIND_ALGORITHM,
     REQUEST_KIND_LEETCODE,
@@ -164,6 +165,7 @@ def build_fixer_prompt(
         {
             "manim_version": env_info.manim_version,
             "latex_block": build_latex_block(env_info),
+            "allowed_api": get_allowed_api_reference(),
             "scene_class": scene_class,
             "error_tail": error_tail,
             "script": script,
@@ -177,12 +179,13 @@ def build_prompt(request: VideoRequest, env_info: EnvInfo) -> str:
     template = _read(SYSTEM_PROMPT_PATH, "system prompt template")
     recipes = _read(DIAGRAM_RECIPES_PATH, "diagram recipes")
     kit_reference = _read(KIT_REFERENCE_PATH, "visual kit reference")
+    full_kit_reference = f"{kit_reference}\n\n{get_allowed_api_reference()}"
 
     style_name, style_text = get_style(request.preferences_or_default.explanation_style)
 
     values: dict[str, str] = {
         "manim_version": env_info.manim_version,
-        "kit_reference": kit_reference,
+        "kit_reference": full_kit_reference,
         "latex_block": build_latex_block(env_info),
         "request_kind": request.request_kind,
         "input_block": build_input_block(request),

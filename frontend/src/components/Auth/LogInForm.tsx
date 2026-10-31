@@ -11,6 +11,8 @@ interface LogInFormProps {
   onSwitchToSignUp: () => void;
   onGoogleSignIn: () => void;
   isGoogleLoading?: boolean;
+  externalError?: string | null;
+  onClearExternalError?: () => void;
   onTriggerShake: () => void;
   onHoverStart?: (type?: string) => void;
   onHoverEnd?: () => void;
@@ -21,6 +23,8 @@ export const LogInForm: React.FC<LogInFormProps> = ({
   onSwitchToSignUp,
   onGoogleSignIn,
   isGoogleLoading = false,
+  externalError = null,
+  onClearExternalError,
   onTriggerShake,
   onHoverStart,
   onHoverEnd,
@@ -33,7 +37,9 @@ export const LogInForm: React.FC<LogInFormProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [serverError, setServerError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const displayedError = error || externalError;
 
   const emailRef = useRef<HTMLInputElement | null>(null);
   const passwordRef = useRef<HTMLInputElement | null>(null);
@@ -57,7 +63,8 @@ export const LogInForm: React.FC<LogInFormProps> = ({
   const handleChange = (field: keyof typeof formData) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setFormData((prev) => ({ ...prev, [field]: val }));
-    setServerError(null);
+    setError(null);
+    onClearExternalError?.();
 
     if (touched[field]) {
       const err = validateField(field, val);
@@ -73,7 +80,8 @@ export const LogInForm: React.FC<LogInFormProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setServerError(null);
+    setError(null);
+    onClearExternalError?.();
 
     const newErrors: Record<string, string> = {};
     (['email', 'password'] as const).forEach((f) => {
@@ -105,24 +113,12 @@ export const LogInForm: React.FC<LogInFormProps> = ({
       };
       const res = await logIn(params);
       onSuccess(res.user.name);
-    } catch (err) {
-      let msg = authContent.errors.genericFailure;
-      if (err instanceof ApiError) {
-        if (err.status === 401) {
-          msg = "Incorrect email or password.";
-        } else if (err.status === 429) {
-          msg = "Too many attempts. Please wait a minute.";
-        } else if (err.status === 0 || err.status >= 500) {
-          msg = "Can't reach the server. Please try again.";
-        } else {
-          msg = err.message || msg;
-        }
-      } else if (err instanceof TypeError || (err instanceof Error && /network|fetch|failed to fetch/i.test(err.message))) {
-        msg = "Can't reach the server. Please try again.";
-      } else if (err instanceof Error && err.message) {
-        msg = err.message;
+    } catch (err: any) {
+      if (import.meta.env.DEV) {
+        console.error('Login error:', err);
       }
-      setServerError(msg);
+      const msg = err?.message || authContent.errors.genericFailure;
+      setError(msg);
       onTriggerShake();
     } finally {
       setIsSubmitting(false);
@@ -131,16 +127,6 @@ export const LogInForm: React.FC<LogInFormProps> = ({
 
   return (
     <form onSubmit={handleSubmit} className="w-full flex flex-col gap-3" noValidate>
-      {/* Red Error Banner */}
-      {serverError && (
-        <div
-          role="alert"
-          className="w-full rounded-[12px] bg-[#D9485F]/10 border border-[#D9485F]/25 px-3.5 py-2.5 text-[13px] text-[#D9485F] leading-snug"
-        >
-          {serverError}
-        </div>
-      )}
-
       {/* 1. Email Address */}
       <TextField
         ref={emailRef}
@@ -186,6 +172,16 @@ export const LogInForm: React.FC<LogInFormProps> = ({
         </div>
       </div>
 
+      {/* Red Error Alert near submit button */}
+      {displayedError && (
+        <div
+          role="alert"
+          className="w-full rounded-[12px] bg-[#D9485F]/10 border border-[#D9485F]/25 px-3.5 py-2.5 text-[13px] text-[#D9485F] leading-snug"
+        >
+          {displayedError}
+        </div>
+      )}
+
       {/* 3. Primary Submit Button: Solid near-black #111113 */}
       <button
         type="submit"
@@ -223,7 +219,11 @@ export const LogInForm: React.FC<LogInFormProps> = ({
           {authContent.footer.login.switchPrompt}{' '}
           <button
             type="button"
-            onClick={onSwitchToSignUp}
+            onClick={() => {
+              setError(null);
+              onClearExternalError?.();
+              onSwitchToSignUp();
+            }}
             onMouseEnter={() => onHoverStart?.('button')}
             onMouseLeave={onHoverEnd}
             className="text-[#111113] font-semibold hover:underline transition-colors focus:outline-none"

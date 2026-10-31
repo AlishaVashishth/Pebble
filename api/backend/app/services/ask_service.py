@@ -3,12 +3,15 @@
 import logging
 import re
 from typing import Optional, Tuple
+from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
 from backend.app.config import get_settings
+from backend.app.core.code_detection import detect_pasted_code, detect_underlying_algorithm
 from backend.app.core.dsa_keywords import contains_dsa_keyword, has_prompt_injection
 from backend.app.models.ask_history import AskHistory
 from backend.app.models.user import User
+from backend.app.repositories.video_repository import VideoRepository
 from backend.app.schemas.ask import (
     AskResponse,
     CandidateInfo,
@@ -16,17 +19,20 @@ from backend.app.schemas.ask import (
     SolutionInfo,
 )
 from backend.app.schemas.video import CreateVideoJobRequest
+from backend.app.services.cache_service import CacheService
 from backend.app.services.intent_service import IntentService
 from backend.app.services.payload_builder import PayloadBuilder
 from backend.app.services.problem_service import ProblemService
+from backend.app.services.video_service import VideoService
 
 logger = logging.getLogger(__name__)
 
 OUT_OF_SCOPE_MESSAGE = (
     "Sorry, I can only help with data structures and algorithms. "
-    "Try a LeetCode number, a problem name, or a topic like arrays, trees or graphs."
+    "Try a LeetCode number, a problem name, a topic like arrays, trees or graphs, or paste your own code."
 )
 CONCEPT_MESSAGE = "Pebble will generate the explanation from your description."
+USER_CODE_MESSAGE = "Pebble will explain the algorithm behind your code."
 
 
 class AskService:
@@ -41,38 +47,8 @@ class AskService:
         self.intent_service = intent_service or IntentService()
 
     def _extract_code_block(self, text: str) -> Tuple[bool, Optional[str], Optional[str], str]:
-        """Detect and extract fenced or pasted code blocks.
-
-        Returns:
-            Tuple[detected: bool, code: Optional[str], language: Optional[str], remaining_text: str]
-        """
-        # 1. Fenced code block (```lang ... ```)
-        fenced_match = re.search(r"```([a-zA-Z0-9_+-]*)\n?([\s\S]*?)```", text)
-        if fenced_match:
-            lang = fenced_match.group(1).lower().strip() or None
-            if lang in ("c++", "cpp"):
-                lang = "cpp"
-            elif lang in ("py", "python"):
-                lang = "python"
-            code = fenced_match.group(2).strip()
-            remaining = (text[: fenced_match.start()] + " " + text[fenced_match.end() :]).strip()
-            return True, code, lang, remaining
-
-        # 2. Heuristic for pasted code without markdown fences
-        py_patterns = [r"\bdef\s+\w+\s*\(.*?\):", r"\bclass\s+\w+[\s:(]"]
-        java_cpp_patterns = [
-            r"\b(?:public|private|protected)?\s*(?:static)?\s*(?:int|void|boolean|bool|string|vector|List|ListNode|TreeNode)\s+\w+\s*\(",
-            r"#include\s+<",
-            r"std::vector",
-        ]
-        all_patterns = py_patterns + java_cpp_patterns
-
-        is_code = any(re.search(pat, text) for pat in all_patterns)
-        if is_code:
-            detected_lang = "python" if any(re.search(pat, text) for pat in py_patterns) else "cpp"
-            return True, text.strip(), detected_lang, ""
-
-        return False, None, None, text
+        """Detect and extract fenced or pasted code blocks."""
+        return detect_pasted_code(text)
 
     def _extract_problem_query(self, text: str) -> Optional[str]:
         """Extract candidate problem query from conversational text."""
@@ -167,12 +143,89 @@ class AskService:
         except Exception as e:
             logger.error("Failed to record ask history: %s", type(e).__name__)
 
+    def _resolve_video_job(
+        self,
+        db: Session,
+        v_req: Optional[CreateVideoJobRequest],
+        user: Optional[User],
+        background_tasks: Optional[BackgroundTasks],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Check for existing completed video or asynchronously trigger generation.
+
+        Returns:
+            Tuple[video_job_id, video_status, video_url]
+        """
+        if not v_req:
+            return None, None, None
+
+        # 1. Check if video already exists in cache/DB
+        try:
+            cache_key = CacheService.compute_cache_key(
+                problem_id=v_req.problem_id,
+                text=v_req.text if not v_req.problem_id else None,
+                programming_language=v_req.programming_language,
+                user_code=v_req.user_code.strip() if v_req.user_code else None,
+                is_user_code=bool(v_req.user_code and v_req.user_code.strip()),
+            )
+            video_repo = VideoRepository()
+            existing = video_repo.get_completed_video_by_cache_key(db, cache_key)
+            if existing and existing.video_url:
+                video_service = VideoService()
+                if video_service._verify_video_url_live(existing.video_url):
+                    return str(existing.video_job_id), "completed", existing.video_url
+        except Exception as e:
+            logger.warning("Error checking existing video cache: %s", e)
+
+        # 2. Trigger asynchronous generation if user is authenticated and background_tasks available
+        if user and background_tasks is not None:
+            try:
+                video_service = VideoService()
+                job_resp = video_service.create_video_job(
+                    db=db,
+                    user=user,
+                    req=v_req,
+                    background_tasks=background_tasks,
+                )
+                v_status = "completed" if job_resp.status == "completed" else "processing"
+                return job_resp.id, v_status, job_resp.video_url
+            except Exception as e:
+                logger.warning("Asynchronous video job initiation failed: %s", e)
+                return None, None, None
+
+        return None, None, None
+
+    def _finalize_response(
+        self,
+        db: Session,
+        user: Optional[User],
+        text: str,
+        response: AskResponse,
+        problem_id_int: Optional[int],
+        programming_language: Optional[str],
+        background_tasks: Optional[BackgroundTasks] = None,
+    ) -> AskResponse:
+        """Enrich response with asynchronous or cached video job details and record history."""
+        if response.can_generate and response.video_request:
+            v_job_id, v_status, v_url = self._resolve_video_job(
+                db=db,
+                v_req=response.video_request,
+                user=user,
+                background_tasks=background_tasks,
+            )
+            response.video_job_id = v_job_id
+            response.video_status = v_status
+            response.video_url = v_url
+
+        self._safe_save_history(db, user, text, response.status, problem_id_int, programming_language)
+        return response
+
     def ask(
         self,
         db: Session,
         text: str,
         programming_language: str = "python",
         user: Optional[User] = None,
+        background_tasks: Optional[BackgroundTasks] = None,
     ) -> AskResponse:
         """Process an /ask query conforming to status specification.
 
@@ -239,32 +292,32 @@ class AskService:
                     video_request=v_req,
                     video_payload=v_pl,
                 )
-                self._safe_save_history(db, user, text, response.status, prob_resolved.id, programming_language)
-                return response
+                return self._finalize_response(db, user, text, response, prob_resolved.id, programming_language, background_tasks)
             else:
-                c_text = (remaining_text.strip() if remaining_text and remaining_text.strip() else text)[:300]
+                underlying = detect_underlying_algorithm(code_content)
+                default_desc = underlying or text
+                c_text = (remaining_text.strip() if remaining_text and remaining_text.strip() else default_desc)[:300]
                 v_req = CreateVideoJobRequest(
                     text=c_text,
                     user_code=code_content,
-                    programming_language=programming_language,
+                    programming_language=target_lang,
                 )
                 v_pl = PayloadBuilder.build_payload(
                     text=c_text,
                     code=code_content,
-                    programming_language=programming_language,
+                    programming_language=target_lang,
                     validated=False,
                 )
                 response = AskResponse(
                     status="concept",
-                    message=CONCEPT_MESSAGE,
+                    message=USER_CODE_MESSAGE,
                     solution=user_solution,
                     available_languages=[],
                     can_generate=True,
                     video_request=v_req,
                     video_payload=v_pl,
                 )
-                self._safe_save_history(db, user, text, response.status, None, programming_language)
-                return response
+                return self._finalize_response(db, user, text, response, None, target_lang, background_tasks)
 
         # 3. Standard Text Query Processing
         query_candidate = self._extract_problem_query(text)
@@ -382,8 +435,7 @@ class AskService:
                                 video_request=v_req,
                                 video_payload=v_pl,
                             )
-                        self._safe_save_history(db, user, text, response.status, prob_info.id, effective_lang)
-                        return response
+                        return self._finalize_response(db, user, text, response, prob_info.id, effective_lang, background_tasks)
                     else:
                         c_text = (classification.clean_title or text)[:300]
                         v_req = CreateVideoJobRequest(
@@ -402,8 +454,7 @@ class AskService:
                             video_request=v_req,
                             video_payload=v_pl,
                         )
-                        self._safe_save_history(db, user, text, response.status, None, effective_lang)
-                        return response
+                        return self._finalize_response(db, user, text, response, None, effective_lang, background_tasks)
 
                 if classification.intent == "algorithm_concept":
                     c_text = (classification.clean_title or text)[:300]
@@ -423,8 +474,7 @@ class AskService:
                         video_request=v_req,
                         video_payload=v_pl,
                     )
-                    self._safe_save_history(db, user, text, response.status, None, effective_lang)
-                    return response
+                    return self._finalize_response(db, user, text, response, None, effective_lang, background_tasks)
 
         # Case A: Problem Resolved (exact matches, classifier failure, or INTENT_PROVIDER == "off")
         if resolve_result.resolved and resolve_result.problem:
@@ -489,8 +539,7 @@ class AskService:
                     video_payload=v_pl,
                 )
 
-            self._safe_save_history(db, user, text, response.status, prob_info.id, programming_language)
-            return response
+            return self._finalize_response(db, user, text, response, prob_info.id, programming_language, background_tasks)
 
         # 4. LLM Intent Classifier (if enabled)
         if intent_enabled:
@@ -570,8 +619,7 @@ class AskService:
                                 video_request=v_req,
                                 video_payload=v_pl,
                             )
-                        self._safe_save_history(db, user, text, response.status, prob_info.id, effective_lang)
-                        return response
+                        return self._finalize_response(db, user, text, response, prob_info.id, effective_lang, background_tasks)
 
                 # algorithm_concept or unresolved dsa_problem
                 if classification.intent in ("algorithm_concept", "dsa_problem"):
@@ -592,8 +640,7 @@ class AskService:
                         video_request=v_req,
                         video_payload=v_pl,
                     )
-                    self._safe_save_history(db, user, text, response.status, None, effective_lang)
-                    return response
+                    return self._finalize_response(db, user, text, response, None, effective_lang, background_tasks)
 
         # Case B: Problem NOT Resolved
         # Scope gate: cap text at 300 characters for concept checking
@@ -648,5 +695,4 @@ class AskService:
             video_request=v_req,
             video_payload=v_pl,
         )
-        self._safe_save_history(db, user, text, response.status, None, programming_language)
-        return response
+        return self._finalize_response(db, user, text, response, None, programming_language, background_tasks)

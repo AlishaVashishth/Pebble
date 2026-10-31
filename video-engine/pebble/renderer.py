@@ -16,18 +16,21 @@ must not lose the whole video.
 from __future__ import annotations
 
 import ast
+import concurrent.futures
 import json
 import logging
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from pebble.config import Settings
+from pebble.caption_normalizer import normalize_captions
 from pebble.cost import CostTracker, log_llm_call
 from pebble.environment import EnvInfo
 from pebble.errors import RenderError
@@ -35,7 +38,7 @@ from pebble.llm import LLMClient
 from pebble.models import GenerationResult, SceneMeta
 from pebble.mux import probe_duration
 from pebble.prompt_builder import build_fixer_prompt
-from pebble.validators import validate_manim_code
+from pebble.validators import validate_manim_code, validate_single_scene
 from pebble.workspace import JobWorkspace
 
 logger = logging.getLogger(__name__)
@@ -125,6 +128,48 @@ def build_render_script(workspace: JobWorkspace) -> Path:
 MAX_CAPTION = 70
 
 
+def extract_scene_code(script: str, class_name: str) -> str | None:
+    """Extract just the Python code defining class_name."""
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return None
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ),
+        None,
+    )
+    if target is None or target.end_lineno is None:
+        return None
+    lines = script.splitlines()
+    return "\n".join(lines[target.lineno - 1 : target.end_lineno])
+
+
+def replace_scene_code(script: str, class_name: str, new_scene_code: str) -> str:
+    """Replace class_name definition in script with new_scene_code."""
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return script
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ),
+        None,
+    )
+    if target is None or target.end_lineno is None:
+        return script
+    lines = script.splitlines()
+    replacement = new_scene_code.strip().splitlines()
+    new_lines = lines[: target.lineno - 1] + replacement + lines[target.end_lineno :]
+    return "\n".join(new_lines) + "\n"
+
+
 def build_fallback_script(script: str, class_name: str, title: str) -> str:
     """Replace one scene class with a kit-only title card.
 
@@ -193,6 +238,7 @@ class SceneRenderer:
         self.expected_names = list(expected_names)
         self._client = client
         self.cost = cost
+        self._lock = threading.Lock()
 
     @property
     def client(self) -> LLMClient:
@@ -328,8 +374,13 @@ class SceneRenderer:
         self, class_name: str, problems: str, expected: list[str]
     ) -> str | None:
         """Ask the LLM for a fix. Returns the accepted code, or None if rejected."""
-        script = self.workspace.animation_path.read_text(encoding="utf-8")
-        prompt = build_fixer_prompt(script, class_name, problems, self.env_info)
+        with self._lock:
+            script = self.workspace.animation_path.read_text(encoding="utf-8")
+
+        scene_code = extract_scene_code(script, class_name)
+        code_to_repair = scene_code if scene_code else script
+
+        prompt = build_fixer_prompt(code_to_repair, class_name, problems, self.env_info)
         response = self.client.call_llm(prompt)
 
         if self.cost is not None:
@@ -341,8 +392,28 @@ class SceneRenderer:
             )
             log_llm_call(logger, "repair", None, response, self.cost)
 
-        candidate = strip_markdown_fences(response.text)
+        candidate = strip_markdown_fences(response.text).strip()
+        candidate = normalize_captions(candidate)
 
+        single_scene = extract_scene_code(candidate, class_name) or (
+            candidate if f"class {class_name}" in candidate else None
+        )
+
+        if single_scene:
+            problems_found = validate_single_scene(
+                single_scene, class_name, self.env_info.latex_available
+            )
+            if problems_found:
+                logger.warning(
+                    "per-scene repair for %s rejected (%d problem(s)): %s",
+                    class_name,
+                    len(problems_found),
+                    "; ".join(problems_found[:3]),
+                )
+                return None
+            return single_scene
+
+        # Fallback to full-script validation if candidate is the whole script
         problems_found = validate_manim_code(
             candidate, expected, self.env_info.latex_available
         )
@@ -364,13 +435,14 @@ class SceneRenderer:
     # -- public --------------------------------------------------------
     def _use_fallback(self, scene: SceneMeta) -> None:
         """Swap the failing scene for a kit-only title card in animation.py."""
-        script = self.workspace.animation_path.read_text(encoding="utf-8")
-        fallback = build_fallback_script(script, scene.class_name, scene.title)
-        if fallback == script:  # pragma: no cover - defensive
-            logger.warning("could not build a fallback for %s", scene.class_name)
-            return
-        self.workspace.animation_path.write_text(fallback, encoding="utf-8")
-        build_render_script(self.workspace)
+        with self._lock:
+            script = self.workspace.animation_path.read_text(encoding="utf-8")
+            fallback = build_fallback_script(script, scene.class_name, scene.title)
+            if fallback == script:  # pragma: no cover - defensive
+                logger.warning("could not build a fallback for %s", scene.class_name)
+                return
+            self.workspace.animation_path.write_text(fallback, encoding="utf-8")
+            build_render_script(self.workspace)
 
     def render_scene(self, scene: SceneMeta, index: int) -> SceneRender:
         expected = self.expected_names
@@ -378,8 +450,18 @@ class SceneRenderer:
         attempt = self._run_manim(scene.class_name)
         attempts = 0
         applied = 0
+        last_problems: str | None = None
 
         while attempt.output is None and attempts < self.settings.max_render_retries:
+            problems_str = self._repair_problems(attempt)
+            if last_problems is not None and problems_str.strip() == last_problems.strip():
+                logger.warning(
+                    "[render] %s repair returned identical errors as previous attempt; stopping repair and using fallback",
+                    scene.class_name,
+                )
+                break
+            last_problems = problems_str
+
             attempts += 1
             logger.info(
                 "[render %d/%d] %s repair attempt %d/%d",
@@ -390,14 +472,31 @@ class SceneRenderer:
                 self.settings.max_render_retries,
             )
             candidate = self._try_repair(
-                scene.class_name, self._repair_problems(attempt), expected
+                scene.class_name, problems_str, expected
             )
             if candidate is None:
                 continue
 
-            self._backup(attempts)
-            self.workspace.animation_path.write_text(candidate, encoding="utf-8")
-            build_render_script(self.workspace)
+            with self._lock:
+                current_script = self.workspace.animation_path.read_text(encoding="utf-8")
+                extracted = extract_scene_code(candidate, scene.class_name)
+                if extracted or f"class {scene.class_name}" in candidate:
+                    scene_to_replace = extracted or candidate
+                    updated = replace_scene_code(current_script, scene.class_name, scene_to_replace)
+                else:
+                    updated = candidate
+                try:
+                    ast.parse(updated)
+                except SyntaxError as exc:
+                    logger.warning(
+                        "[render] %s spliced repair syntax error: %s",
+                        scene.class_name,
+                        exc,
+                    )
+                    continue
+                self._backup(attempts)
+                self.workspace.animation_path.write_text(updated, encoding="utf-8")
+                build_render_script(self.workspace)
             applied += 1
             # Only the failing scene is re-rendered; finished scenes are kept.
             attempt = self._run_manim(scene.class_name)
@@ -466,7 +565,7 @@ def render_scenes(
     on_scene: Callable[[SceneRender], None] | None = None,
     cost: CostTracker | None = None,
 ) -> list[SceneRender]:
-    """Render every scene in order; raises RenderError instead of skipping one."""
+    """Render every scene; raises RenderError instead of skipping one."""
     scenes = scene_targets(result)
     install_runtime(workspace)
     build_render_script(workspace)
@@ -475,10 +574,28 @@ def render_scenes(
         workspace, settings, env_info, [meta.class_name for meta in scenes], client, cost
     )
 
-    rendered: list[SceneRender] = []
-    for index, scene in enumerate(scenes, start=1):
-        scene_render = renderer.render_scene(scene, index)
-        rendered.append(scene_render)
-        if on_scene is not None:
-            on_scene(scene_render)
-    return rendered
+    workers = getattr(settings, "render_workers", 3)
+    if workers <= 1 or len(scenes) <= 1:
+        rendered: list[SceneRender] = []
+        for index, scene in enumerate(scenes, start=1):
+            scene_render = renderer.render_scene(scene, index)
+            rendered.append(scene_render)
+            if on_scene is not None:
+                on_scene(scene_render)
+        return rendered
+
+    logger.info("rendering %d scene(s) in parallel (workers=%d)", len(scenes), workers)
+    tasks = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for index, scene in enumerate(scenes, start=1):
+            future = executor.submit(renderer.render_scene, scene, index)
+            tasks.append((index, future))
+
+        rendered_map: dict[int, SceneRender] = {}
+        for index, future in tasks:
+            scene_render = future.result()
+            rendered_map[index] = scene_render
+            if on_scene is not None:
+                on_scene(scene_render)
+
+    return [rendered_map[i] for i in sorted(rendered_map.keys())]

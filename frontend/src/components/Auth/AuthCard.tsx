@@ -36,7 +36,8 @@ export const AuthCard: React.FC<AuthCardProps> = ({
   const [isSuccess, setIsSuccess] = useState(false);
   const [successUser, setSuccessUser] = useState<string>('');
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
-  const [shakeKey, setShakeKey] = useState(0);
+  const [googleError, setGoogleError] = useState<string | null>(null);
+  const [isShaking, setIsShaking] = useState(false);
 
   const isReducedMotion =
     typeof window !== 'undefined' &&
@@ -46,12 +47,16 @@ export const AuthCard: React.FC<AuthCardProps> = ({
     if (tab === activeTab) return;
     setDirection(tab === 'login' ? 1 : -1);
     setActiveTab(tab);
+    setGoogleError(null);
     onSwitchMode(tab);
   };
 
   const triggerShake = () => {
     if (!isReducedMotion) {
-      setShakeKey((prev) => prev + 1);
+      setIsShaking(false);
+      requestAnimationFrame(() => {
+        setIsShaking(true);
+      });
     }
   };
 
@@ -62,10 +67,15 @@ export const AuthCard: React.FC<AuthCardProps> = ({
 
   const handleGoogleSignIn = async () => {
     setIsGoogleLoading(true);
+    setGoogleError(null);
     try {
       const res = await signInWithGoogle();
       handleAuthSuccess(res.user.name);
-    } catch {
+    } catch (err: any) {
+      if (import.meta.env.DEV) {
+        console.error('Google sign-in error:', err);
+      }
+      setGoogleError("Google sign-in was cancelled or failed. Please try again.");
       triggerShake();
     } finally {
       setIsGoogleLoading(false);
@@ -84,13 +94,15 @@ export const AuthCard: React.FC<AuthCardProps> = ({
 
   return (
     <motion.div
-      key={shakeKey}
       animate={
-        shakeKey > 0 && !isReducedMotion
+        isShaking && !isReducedMotion
           ? { x: [-6, 6, -5, 5, -3, 3, 0] }
           : { x: 0 }
       }
       transition={{ duration: 0.3 }}
+      onAnimationComplete={() => {
+        if (isShaking) setIsShaking(false);
+      }}
       className="relative w-[min(1040px,calc(100vw-48px))] max-[899px]:w-[min(460px,calc(100vw-32px))] h-[min(700px,calc(100vh-48px))] max-[899px]:h-auto max-[899px]:max-h-[calc(100vh-32px)] bg-[#FAFAFB] rounded-[28px] border border-black/[0.06] shadow-[0_30px_80px_rgba(17,17,17,0.12)] p-3 grid grid-cols-1 min-[900px]:grid-cols-2 gap-3 select-none overflow-hidden"
     >
       {/* Round "X" Close Button at top right */}
@@ -253,6 +265,8 @@ export const AuthCard: React.FC<AuthCardProps> = ({
                       onSwitchToLogIn={() => handleTabChange('login')}
                       onGoogleSignIn={handleGoogleSignIn}
                       isGoogleLoading={isGoogleLoading}
+                      externalError={googleError}
+                      onClearExternalError={() => setGoogleError(null)}
                       onTriggerShake={triggerShake}
                       onHoverStart={onHoverStart}
                       onHoverEnd={onHoverEnd}
@@ -280,6 +294,8 @@ export const AuthCard: React.FC<AuthCardProps> = ({
                       onSwitchToSignUp={() => handleTabChange('signup')}
                       onGoogleSignIn={handleGoogleSignIn}
                       isGoogleLoading={isGoogleLoading}
+                      externalError={googleError}
+                      onClearExternalError={() => setGoogleError(null)}
                       onTriggerShake={triggerShake}
                       onHoverStart={onHoverStart}
                       onHoverEnd={onHoverEnd}

@@ -13,7 +13,7 @@ from backend.app.api.health import router as health_router
 from backend.app.api.history import router as history_router
 from backend.app.api.problems import router as problems_router
 from backend.app.api.users import router as users_router
-from backend.app.api.video import router as video_router
+from backend.app.api.video import router as video_router, status_router as video_status_router
 from backend.app.config import get_settings
 from backend.app.core.exceptions import setup_exception_handlers
 from backend.app.core.logging import setup_secure_logging
@@ -71,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(history_router)
     app.include_router(conversations_router)
     app.include_router(video_router)
+    app.include_router(video_status_router)
 
     return app
 

@@ -20,7 +20,7 @@ class AuthService:
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="User with this email already exists",
+                detail="This email is already registered. Try logging in.",
             )
 
         hashed = hash_password(req.password)
@@ -41,14 +41,14 @@ class AuthService:
         if not user or not user.password_hash:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password",
+                detail="Incorrect email or password.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
         if not verify_password(req.password, user.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password",
+                detail="Incorrect email or password.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 

@@ -63,7 +63,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({
             className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-[12px] bg-[#111113] hover:bg-[#25252A] text-white text-xs font-semibold shadow-xs transition-all cursor-pointer active:scale-98"
           >
             <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-            <span>New conversation</span>
+            <span>New chat</span>
           </button>
         </div>
 

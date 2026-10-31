@@ -114,6 +114,7 @@ export const Message: React.FC<MessageProps> = ({ message, isStreaming = false, 
               videoRequest={message.meta.video_request}
               initialVideoUrl={message.meta.video_url}
               initialJobId={message.meta.video_job_id}
+              initialStatus={message.meta.video_status}
               onMetaUpdate={(updates) => onUpdateMeta?.(message.id, updates)}
             />
           </div>

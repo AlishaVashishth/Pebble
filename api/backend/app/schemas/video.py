@@ -1,6 +1,6 @@
 """Pydantic schemas for video generation jobs and results."""
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 from backend.app.schemas.contracts import VideoJobStatus
 
@@ -39,6 +39,19 @@ class VideoJobResponse(BaseModel):
     id: str
     status: VideoJobStatus
     stage: str
+    video_url: Optional[str] = None
+    error: Optional[str] = None
+    queue_position: Optional[int] = None
+    elapsed_seconds: Optional[int] = None
+
+
+class VideoJobStatusResponse(BaseModel):
+    """Status endpoint response supporting status polling."""
+
+    id: str
+    status: Literal["queued", "processing", "completed", "failed"]
+    stage: Optional[str] = None
+    videoUrl: Optional[str] = None
     video_url: Optional[str] = None
     error: Optional[str] = None
     queue_position: Optional[int] = None

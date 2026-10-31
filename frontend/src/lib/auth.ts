@@ -33,13 +33,13 @@
        const { access_token } = await request<{ access_token: string }>('/auth/login', {
          method: 'POST', auth: false, body: { email: e, password },
        });
+       clearStoredAuth();
        setToken(access_token);
        const user = toUser(created);
        saveUser(user);
        return { user, token: access_token };
      } catch (err) {
-       throw new ApiError('Your account was created, but automatic log in failed. Please switch to Log in.',
-         err instanceof ApiError ? err.status : 0);
+       throw new Error('Your account was created, but automatic log in failed. Please switch to Log in.');
      }
    }
 
@@ -47,6 +47,7 @@
      const { access_token } = await request<{ access_token: string }>('/auth/login', {
        method: 'POST', auth: false, body: { email: email.trim().toLowerCase(), password },
      });
+     clearStoredAuth();
      setToken(access_token);
      try { return { user: await fetchCurrentUser(), token: access_token }; }
      catch (err) { clearStoredAuth(); throw err; }
@@ -136,6 +137,7 @@
        auth: false,
        body: { credential },
      });
+     clearStoredAuth();
      setToken(access_token);
      try {
        return { user: await fetchCurrentUser(), token: access_token };

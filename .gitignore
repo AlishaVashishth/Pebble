@@ -56,3 +56,11 @@ Thumbs.db
 frontend/.aistudio/
 video-engine/.env
 *.env
+
+
+# video engine
+video-engine/workspace/
+media/
+*.mp4
+*.mp3
+*.db

@@ -1,7 +1,7 @@
 """API route for /ask endpoint."""
 
 import logging
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy.orm import Session
 
 from backend.app.core.dependencies import get_current_user
@@ -21,6 +21,7 @@ router = APIRouter(tags=["Ask"])
 def ask_question(
     request: Request,
     payload: AskRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> AskResponse:
@@ -36,4 +37,5 @@ def ask_question(
         text=payload.text,
         programming_language=payload.programming_language,
         user=current_user,
+        background_tasks=background_tasks,
     )
