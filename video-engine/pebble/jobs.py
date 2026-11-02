@@ -161,6 +161,15 @@ class JobStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_active_job_ids(self) -> set[str]:
+        """Return the set of all job IDs that are currently queued or processing."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT job_id FROM jobs WHERE status IN (?, ?)",
+                (STATUS_QUEUED, STATUS_PROCESSING),
+            ).fetchall()
+            return {row[0] for row in rows}
+
     def next_queued(self) -> dict[str, Any] | None:
         with self._lock:
             row = self._connection.execute(

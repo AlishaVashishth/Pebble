@@ -326,6 +326,9 @@ class BlobStorage:
             return None
         if not isinstance(payload, dict) or "video_url" not in payload:
             return None
+        if payload.get("fallback_scenes"):
+            logger.info("cached result for %s contains fallback scenes; ignoring cache", fingerprint[:12])
+            return None
         return payload
 
     def upload_job_bundle(
@@ -351,11 +354,19 @@ class BlobStorage:
                 content_type=JSON_CONTENT_TYPE,
             )
         # Written last: its presence is what makes the blob a cache hit.
-        self.upload_bytes(
-            json.dumps(result, indent=2, ensure_ascii=False).encode("utf-8"),
-            self.result_key(fingerprint),
-            content_type=JSON_CONTENT_TYPE,
-        )
+        # Videos with fallback scenes must NEVER be cached as reusable results.
+        if not result.get("fallback_scenes"):
+            self.upload_bytes(
+                json.dumps(result, indent=2, ensure_ascii=False).encode("utf-8"),
+                self.result_key(fingerprint),
+                content_type=JSON_CONTENT_TYPE,
+            )
+        else:
+            logger.warning(
+                "job bundle has fallback scenes (%s); skipped writing %s to prevent caching",
+                result.get("fallback_scenes"),
+                self.result_key(fingerprint),
+            )
         return self.public_url(video_key)
 
     # -- helpers ---------------------------------------------------------

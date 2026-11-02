@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 
+from pebble.caption_normalizer import normalize_captions
 from pebble.config import Settings
 from pebble.cost import CostTracker, log_llm_call
 from pebble.environment import EnvInfo
 from pebble.errors import GenerationError
+from pebble.kit_api import get_allowed_api_reference
 from pebble.llm import LLMClient
 from pebble.models import GenerationResult, VideoRequest
 from pebble.parsing import parse_response
@@ -27,8 +29,21 @@ RETRY_FOOTER = (
 
 def _retry_prompt(base_prompt: str, problems: list[str]) -> str:
     listed = "\n".join(f"- {problem}" for problem in problems)
+    reminders = []
+    if any("is not a method of" in p for p in problems):
+        reminders.append(
+            f"{get_allowed_api_reference()}\n"
+            "CRITICAL RULE: Call ONLY the methods listed above for visualization structures. "
+            "Never invent methods."
+        )
+    if any("caption" in p.lower() for p in problems):
+        reminders.append(
+            "CRITICAL RULE: Every set_caption(text) call must be at most 70 characters. "
+            "Keep captions to one concise sentence; never exceed 70 characters."
+        )
+    extra = ("\n\n" + "\n\n".join(reminders)) if reminders else ""
     return (
-        f"{base_prompt}\n\n{RETRY_HEADER} Problems:\n{listed}\n{RETRY_FOOTER}"
+        f"{base_prompt}\n\n{RETRY_HEADER} Problems:\n{listed}{extra}\n{RETRY_FOOTER}"
     )
 
 
@@ -97,6 +112,7 @@ def generate(
 
         try:
             result = parse_response(response.text)
+            result.manim_code = normalize_captions(result.manim_code)
         except Exception as exc:
             all_problems = [str(exc)]
             logger.warning("attempt %d/%d parse failed: %s", attempt, attempts, exc)

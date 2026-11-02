@@ -20,12 +20,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pebble import pipeline as pipeline_module
+from pebble.cleanup import WorkspaceCleaner, delete_job_folder
 from pebble.config import Settings, load_settings
 from pebble.environment import EnvInfo, detect
 from pebble.jobs import FORCE_PAYLOAD_KEY, STATUS_COMPLETED, STATUS_FAILED, JobStore
 from pebble.logging_setup import secret_values
 from pebble.storage import BlobStorage
-from pebble.workspace import WORKSPACE_ROOT
+from pebble.workspace import WORKSPACE_ROOT, get_workspace_root
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,13 @@ class Worker:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self.active_job_id: str | None = None
+        self._cleaner = WorkspaceCleaner(
+            workspace_root=self.workspace_root,
+            store=self.store,
+            retention_days=getattr(self.settings, "failed_retention_days", 3.0),
+            max_gb=getattr(self.settings, "workspace_max_gb", 5.0),
+        )
 
     # -- lifecycle -------------------------------------------------------
 
@@ -99,6 +107,7 @@ class Worker:
         if self.running:
             return
         self._stop.clear()
+        self._cleaner.start()
         self._thread = threading.Thread(target=self._loop, name="pebble-worker", daemon=True)
         self._thread.start()
         logger.info("worker started")
@@ -106,6 +115,7 @@ class Worker:
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
         self._wake.set()
+        self._cleaner.stop()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
@@ -159,6 +169,7 @@ class Worker:
             ", forced" if forced else "",
         )
 
+        self.active_job_id = job_id
         try:
             cached = None if forced else self.storage.get_cached_result(fingerprint)
             if cached is not None:
@@ -181,6 +192,8 @@ class Worker:
             return self._finish(job, fingerprint, result)
         except Exception as exc:  # noqa: BLE001 - every failure is reported, not raised
             return self._fail(job, exc)
+        finally:
+            self.active_job_id = None
 
     def _finish(self, job: dict[str, Any], fingerprint: str, result: Any) -> dict[str, Any]:
         job_id = job["job_id"]
@@ -191,7 +204,10 @@ class Worker:
             "code": result.solution_code,
             "programming_language": result.programming_language,
         }
-        metadata = _read_json(root / "metadata.json")
+        metadata = _read_json(root / "metadata.json") or {}
+        fallback_scenes = metadata.get("fallback_scenes") or [
+            r.class_name for r in getattr(result, "rendered", []) if getattr(r, "used_fallback", False)
+        ]
         video_path = Path(result.final_video)
         video_url = self.storage.public_url(self.storage.video_key(fingerprint))
         result_doc = {
@@ -199,6 +215,7 @@ class Worker:
             "solution": solution,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "duration_seconds": round(float(result.duration_seconds), 2),
+            "fallback_scenes": fallback_scenes,
         }
 
         self.storage.upload_job_bundle(fingerprint, video_path, metadata, result_doc)
@@ -235,21 +252,15 @@ class Worker:
     # -- cleanup ---------------------------------------------------------
 
     def cleanup(self, job_id: str) -> list[str]:
-        """Delete the heavy scratch folders after a successful upload."""
+        """Delete the full workspace folder for a successful job (including its Manim media)."""
         if _keep_workspace():
             logger.info("keeping the full workspace for %s (%s)", job_id, KEEP_WORKSPACE_ENV)
             return []
         root = self.workspace_root / job_id
-        removed: list[str] = []
-        for name in SCRATCH_FOLDERS:
-            folder = root / name
-            if not folder.exists():
-                continue
-            shutil.rmtree(folder, ignore_errors=True)
-            removed.append(name)
-        if removed:
-            logger.info("cleaned scratch folders for %s: %s", job_id, ", ".join(removed))
-        return removed
+        if not root.exists():
+            return []
+        freed = delete_job_folder(job_id, self.workspace_root)
+        return [f"deleted {job_id} (freed {freed:.2f} MB)"]
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}

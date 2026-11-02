@@ -14,14 +14,14 @@ SCENE HELPERS (call with self; each plays its own animation):
 
 STRUCTURES (each is a Mobject, add it with self.play(x.intro()) or self.add(x)). Common constructor args: at=STAGE, max_width=None, max_height=None (auto-fit by default). Common method: .intro(fast=False) -> Animation (fast=True fades in over 0.3s; use fast=True whenever a structure that already appeared in an earlier scene appears again, so scenes feel continuous and keep the same size and position).
   ArrayViz(values, label=None, show_index=True)
-      .set_state(i_or_list, state)  .set_all(state)  .set_value(i, v)  .swap(i, j)
+      .append(v)  .pop(index=-1)  .set_state(i_or_list, state)  .set_all(state)  .set_value(i, v)  .swap(i, j)
       .pointer(name, i, state="active", level=0) -> Pointer      (sits under cell i; give pointers that can share a cell different levels 0, 1, 2)
            Pointer: .intro()  .to(i)  .hide()          (all return an Animation)
       .window(l, r, state="active") -> Window mobject (play FadeIn(win));  .move_window(win, l, r) -> Animation
   MapViz(title, show_values=True, max_rows=6)       (hash map; show_values=False makes it a set)
       .put(k, v=None)  .hit(k)  .miss(label)  .remove(k)  .set_state(k, state)
-  StackViz(title, items=(), capacity=6)     .push(v)  .pop()  .peek()
-  QueueViz(title, items=(), deque=False)    .enqueue(v)  .dequeue()      (deque only: .push_front(v)  .pop_back())
+  StackViz(title, items=(), capacity=6)     .push(v)  .pop()  .peek()  .append(v)
+  QueueViz(title, items=(), deque=False)    .enqueue(v)  .dequeue()  .push(v)  .pop()  .append(v)      (deque only: .push_front(v)  .pop_back()  .popleft()  .appendleft(v))
   LinkedListViz(values)   .set_state(i, state)  .pointer(name, i, state="active", level=0)  .relink(i, j) (arrow from node i to node j; j=None means null)  .remove(i)  .insert_after(i, v)
   TreeViz(level_order)    LeetCode level-order list, None for a missing child, e.g. [3, 9, 20, None, None, 15, 7]
       .set_state(i, state)  .set_edge(i, j, state) (parent i, child j)  .annotate(i, text, state="default")

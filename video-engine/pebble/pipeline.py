@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pebble.config import Settings, load_settings
-from pebble.cost import COST_LOG_PATH, CostTracker, append_cost_log
+from pebble.cost import COST_LOG_PATH, LLM_PURPOSES, CostTracker, append_cost_log
 from pebble.environment import EnvInfo, detect
 from pebble.errors import PebbleError
 from pebble.generation import generate
@@ -325,6 +325,19 @@ def run_pipeline(
         )
         for line in cost_table.splitlines():
             logger.info(line)
+
+        llm_calls = sum(1 for r in tracker.records if r.purpose in LLM_PURPOSES)
+        total_time = timings.get("total", round(time.perf_counter() - total_started, 2))
+        logger.info(
+            "\n"
+            "===================== FINAL PIPELINE SUMMARY =====================\n"
+            "  Total Time:   %.2fs\n"
+            "  LLM Calls:    %d\n"
+            "  Total Cost:   $%.4f USD\n"
+            "  Per-Stage Timings:\n"
+            + "\n".join(f"    - {k:10s}: {v:.2f}s" for k, v in timings.items()) + "\n"
+            "=================================================================="
+        )
 
         return PipelineResult(
             job_id=workspace.job_id,

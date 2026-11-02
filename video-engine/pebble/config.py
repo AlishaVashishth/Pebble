@@ -17,6 +17,13 @@ from pebble.errors import ConfigError
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 
+WORKSPACE_DIR_KEY = "PEBBLE_WORKSPACE_DIR"
+FAILED_RETENTION_DAYS_KEY = "PEBBLE_FAILED_RETENTION_DAYS"
+WORKSPACE_MAX_GB_KEY = "PEBBLE_WORKSPACE_MAX_GB"
+
+DEFAULT_FAILED_RETENTION_DAYS = 3.0
+DEFAULT_WORKSPACE_MAX_GB = 5.0
+
 # Canonical env var names -> accepted aliases (first non-empty wins).
 AZURE_ENDPOINT_KEYS = ("AZURE_OPENAI_ENDPOINT",)
 AZURE_API_KEY_KEYS = ("AZURE_API_KEY", "AZURE_OPENAI_API_KEY")
@@ -177,11 +184,15 @@ class Settings:
     audit_mode: str = DEFAULT_AUDIT_MODE
     max_generation_attempts: int = 3
     max_render_retries: int = 3
+    render_workers: int = 3
     max_output_tokens: int | None = None
     llm_input_price_per_1m: float = DEFAULT_LLM_INPUT_PRICE
     llm_output_price_per_1m: float = DEFAULT_LLM_OUTPUT_PRICE
     tts_price_per_1m_chars: float = DEFAULT_TTS_PRICE
     usd_to_inr: float | None = None
+    workspace_dir: str | None = None
+    failed_retention_days: float = DEFAULT_FAILED_RETENTION_DAYS
+    workspace_max_gb: float = DEFAULT_WORKSPACE_MAX_GB
 
     def __repr__(self) -> str:
         # Secrets never appear in repr / logs.
@@ -197,6 +208,7 @@ class Settings:
             f"audit_mode={self.audit_mode!r}, "
             f"max_generation_attempts={self.max_generation_attempts!r}, "
             f"max_render_retries={self.max_render_retries!r}, "
+            f"render_workers={self.render_workers!r}, "
             f"max_output_tokens={self.max_output_tokens!r}, "
             f"llm_input_price_per_1m={self.llm_input_price_per_1m!r}, "
             f"llm_output_price_per_1m={self.llm_output_price_per_1m!r}, "
@@ -295,6 +307,9 @@ def load_settings() -> Settings:
         max_render_retries=_non_negative_int(
             os.environ.get("MAX_RENDER_RETRIES"), 3, "MAX_RENDER_RETRIES"
         ),
+        render_workers=_positive_int(
+            os.environ.get("PEBBLE_RENDER_WORKERS"), 3, "PEBBLE_RENDER_WORKERS"
+        ),
         max_output_tokens=tokens,
         llm_input_price_per_1m=_positive_float(
             os.environ.get(LLM_INPUT_PRICE_KEY), DEFAULT_LLM_INPUT_PRICE, LLM_INPUT_PRICE_KEY
@@ -306,4 +321,15 @@ def load_settings() -> Settings:
             os.environ.get(TTS_PRICE_KEY), DEFAULT_TTS_PRICE, TTS_PRICE_KEY
         ),
         usd_to_inr=_optional_float(os.environ.get(USD_TO_INR_KEY), USD_TO_INR_KEY),
+        workspace_dir=first_env((WORKSPACE_DIR_KEY,)),
+        failed_retention_days=_positive_float(
+            os.environ.get(FAILED_RETENTION_DAYS_KEY),
+            DEFAULT_FAILED_RETENTION_DAYS,
+            FAILED_RETENTION_DAYS_KEY,
+        ),
+        workspace_max_gb=_positive_float(
+            os.environ.get(WORKSPACE_MAX_GB_KEY),
+            DEFAULT_WORKSPACE_MAX_GB,
+            WORKSPACE_MAX_GB_KEY,
+        ),
     )

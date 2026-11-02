@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
+from pebble.caption_normalizer import normalize_captions
 from pebble.environment import EnvInfo
+from pebble.kit_api import get_allowed_structure_methods
 from pebble.models import (
     STATE_MISSING,
     STATE_UNVERIFIED,
@@ -158,6 +160,8 @@ def validate_manim_code(
     if not (manim_code or "").strip():
         return ["manim_code is empty"]
 
+    manim_code = normalize_captions(manim_code)
+
     if "from manim import *" not in manim_code:
         problems.append("manim_code must contain 'from manim import *'")
 
@@ -198,6 +202,36 @@ def validate_manim_code(
                 problems.append(
                     f"class '{node.name}' subclasses Scene but is not one of the expected scenes"
                 )
+    return problems
+
+
+def validate_single_scene(
+    scene_code: str, class_name: str, latex_available: bool
+) -> list[str]:
+    """Validate a single scene class code in isolation for the repair loop."""
+    problems: list[str] = []
+    if not (scene_code or "").strip():
+        return ["scene_code is empty"]
+
+    norm_code = normalize_captions(scene_code)
+    try:
+        tree = ast.parse(norm_code)
+    except SyntaxError as exc:
+        return [f"scene_code is not valid Python: {exc.msg} (line {exc.lineno})"]
+
+    problems.extend(_check_names(tree, latex_available))
+    problems.extend(_check_finish_scene(tree, [class_name]))
+    problems.extend(_check_config(tree))
+    problems.extend(_check_no_raw_text(tree))
+    problems.extend(_check_kit_methods(tree))
+    problems.extend(_check_intro_usage(tree))
+    problems.extend(_check_no_code(norm_code))
+    problems.extend(_check_caption_length(tree))
+
+    classes = [n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+    if class_name not in classes:
+        problems.append(f"code must define class '{class_name}'")
+
     return problems
 
 
@@ -687,18 +721,18 @@ def validate_generation_split(
         hard.extend(_check_names(tree, env_info.latex_available))
         hard.extend(_check_structure(manim_code, tree, result))
         hard.extend(_check_kit_rules(tree, manim_code))
+        hard.extend(_check_kit_methods(tree))
+        hard.extend(_check_caption_length(tree))
         # SOFT: presentation rules: guidance for the model, never fatal.
         soft.extend(_check_config(tree))
         soft.extend(_check_no_raw_text(tree))
         soft.extend(_check_kit_structure_usage(tree))
-        soft.extend(_check_kit_methods(tree))
         soft.extend(_check_intro_usage(tree))
         soft.extend(_check_result_scene(tree))
         soft.extend(_check_panel_lanes(tree))
         soft.extend(_check_compare_panels_usage(tree, result))
         soft.extend(_check_no_code(manim_code))
         soft.extend(_check_text_sizes(tree))
-        soft.extend(_check_caption_length(tree))
 
     hard.extend(_check_meta(result))
     hard.extend(_check_solution_state(result, request))
@@ -747,24 +781,8 @@ KIT_MOBJECT_METHODS = {
 
 @lru_cache(maxsize=1)
 def kit_structure_methods() -> dict[str, set[str]]:
-    """Structure name -> documented methods, parsed from kit_reference.txt."""
-    try:
-        text = KIT_REFERENCE_PATH.read_text(encoding="utf-8")
-    except OSError:  # pragma: no cover - the file ships with the package
-        return {}
-
-    methods: dict[str, set[str]] = {}
-    owner: str | None = None
-    for line in text.splitlines():
-        match = re.match(r"^  ([A-Za-z_][A-Za-z0-9_]*)\(", line)
-        if match:
-            owner = match.group(1)
-            if owner in KIT_STRUCTURES:
-                methods.setdefault(owner, {"intro"})
-            continue
-        if owner in methods and re.match(r"^ {6}\.", line):
-            methods[owner].update(re.findall(r"\.(\w+)\(", line))
-    return methods
+    """Structure name -> documented methods, dynamically inspected from pebble_kit."""
+    return get_allowed_structure_methods()
 
 
 def _check_result_scene(tree: ast.AST) -> list[str]:
