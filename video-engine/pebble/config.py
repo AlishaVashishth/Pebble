@@ -54,7 +54,7 @@ AZURE_SPEECH_VOICE_KEY = "AZURE_SPEECH_VOICE"
 
 # Bump when the *meaning* of a generated video changes (visuals, pacing,
 # narration), so previously cached videos for the same request are not reused.
-PIPELINE_VERSION = "1"
+PIPELINE_VERSION = "2"
 
 # Layout audit mode for a render: "warn" logs issues, "strict" fails the scene.
 AUDIT_MODE_KEY = "PEBBLE_AUDIT"

@@ -10,26 +10,31 @@ BEGINNER_FRIENDLY = "beginner_friendly"
 
 STYLES: dict[str, str] = {
     "beginner_friendly": (
-        "Assume the viewer is new to the topic. Start with the intuition in everyday "
-        "words, define every term when it first appears, go through the example one "
-        "step at a time and say why each step happens. Use 9-12 scenes, about 3-5 "
-        "minutes total."
+        "Explain to a curious 5-year-old who has never coded. Warm, patient, everyday "
+        "words, one idea per sentence, one real-life picture per problem that you come "
+        "back to. Keep every stage of the teaching order (hook, understand the problem, "
+        "brute force and why it is slow, the aha, the smart trace, the recap) and give "
+        "each stage a little more room than the other styles. Use 9-13 scenes, about "
+        "3-5 minutes total."
     ),
     "interview_focused": (
-        "Assume the viewer is preparing for coding interviews. Briefly state the brute "
-        "force and why it is slow, then the optimal idea, trace it once on an example, "
-        "call out edge cases, and end with time/space trade-offs and what to say in an "
-        "interview. Use 7-10 scenes, about 3-4 minutes total."
+        "Assume the viewer is preparing for coding interviews. Keep every stage of the "
+        "teaching order, but state the brute force and why it is slow quickly, then give "
+        "the optimal idea, trace it once on the same example, call out edge cases and end "
+        "with time/space trade-offs and what to say in an interview. Use 8-11 scenes, "
+        "about 3-4 minutes total."
     ),
     "detailed": (
-        "Deep dive: intuition, why it is correct, two examples including an edge case, "
-        "a line-by-line code walkthrough, complexity derivation, common mistakes. Use "
-        "10-14 scenes, about 5-7 minutes total."
+        "Deep dive: intuition, why it is correct, two examples including an edge case, a "
+        "step-by-step walkthrough of every stage, a complexity derivation and common "
+        "mistakes. Keep the same teaching order and never skip the brute force. Use 10-13 "
+        "scenes, about 5-7 minutes total."
     ),
     "concise": (
-        "Quick recap for someone who knows the basics: the problem in one sentence, "
-        "the key idea, one fast trace, the code, the complexity. Use 5-7 scenes, about "
-        "1.5-2 minutes total."
+        "Quick recap for someone who knows the basics: shorten every stage of the teaching "
+        "order but never remove one - the problem in a sentence, the brute force and why it "
+        "is slow, the key idea, one fast trace, the complexity. Use 9 scenes, about 2 "
+        "minutes total."
     ),
 }
 

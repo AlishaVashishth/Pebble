@@ -161,10 +161,10 @@ def next_id() -> str:
 # hard vs soft problems (soft never kills a job)
 # ---------------------------------------------------------------------------
 
-SOFT_ONLY_MANIM = VALID_MANIM.replace(
-    'self.set_caption("Each number needs a partner")',
-    'self.set_caption("Each number needs a partner, so we remember every value '
-    'we have already seen")',
+# A soft, never-fatal presentation problem: on-screen text the kit did not place.
+SOFT_ONLY_MANIM = VALID_MANIM + (
+    "\n\ndef _onscreen():\n"
+    "    return Text('a floating sentence', font_size=30)\n"
 )
 
 SUPER_SOFT_MANIM = SOFT_ONLY_MANIM.replace(
@@ -182,9 +182,12 @@ def test_soft_problems_are_accepted_with_warnings(monkeypatch, settings, env_inf
 
     # Soft problems are fed back, but the third attempt is accepted anyway.
     assert len(client.prompts) == 3
-    assert "70 characters" in client.prompts[1]
+    assert "do not place on-screen text" in client.prompts[1]
     assert result.generation_warnings
-    assert any("70 characters" in warning for warning in result.generation_warnings)
+    assert any(
+        "do not place on-screen text" in warning
+        for warning in result.generation_warnings
+    )
 
     doc = json.loads(workspace.generation_path.read_text(encoding="utf-8"))
     assert doc["generation_warnings"] == result.generation_warnings
@@ -252,5 +255,5 @@ def test_hard_beats_soft_in_the_retry_feedback(monkeypatch, settings, env_info):
     generate(load_sample("two_sum.json"), workspace, settings, env_info)
 
     # Attempt 2's prompt carries the soft problem; attempt 3's carries the hard one.
-    assert "70 characters" in client.prompts[1]
+    assert "do not place on-screen text" in client.prompts[1]
     assert "import of 'os' is not allowed" in client.prompts[2]

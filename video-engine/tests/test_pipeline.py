@@ -68,9 +68,16 @@ def test_pipeline_produces_a_finished_video(monkeypatch, tmp_path):
 
     # Narration first: the targets file drives finish_scene at render time.
     targets = json.loads((workspace / "pebble_targets.json").read_text(encoding="utf-8"))
-    assert set(targets) == {"Scene1_Intro", "Scene2_Trace"}
+    assert {"Scene1_Intro", "Scene2_Trace"} <= set(targets)
     for voice in result.audio:
         assert abs(targets[voice.class_name] - (voice.duration + HOLD)) < 0.01
+    # Additive: per-sentence timing for beat(), one entry per scene.
+    assert set(targets["_sentences"]) == {"Scene1_Intro", "Scene2_Trace"}
+    for voice in result.audio:
+        spans = targets["_sentences"][voice.class_name]
+        assert [span["text"] for span in spans] == [
+            span["text"] for span in voice.sentences
+        ]
 
     muxed = sorted((workspace / "muxed").glob("*.mp4"))
     assert len(muxed) == 2

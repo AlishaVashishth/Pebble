@@ -38,6 +38,18 @@ def kit():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _clean_kit_state(kit):
+    """Every frame starts from an empty stage: one scene is one process."""
+    kit._STRUCTURES.clear()
+    kit._RESERVED.clear()
+    kit._TIMINGS_CACHE = None
+    yield
+    kit._STRUCTURES.clear()
+    kit._RESERVED.clear()
+    kit._TIMINGS_CACHE = None
+
+
 class FakeScene:
     """The only part of a Scene the audit touches."""
 
@@ -587,17 +599,210 @@ def test_stack_puts_the_newest_item_on_top(kit):
     stack.push("save")
     labels = [item.label.original_text for item in stack.items]
     assert labels == ["save", "edit", "open"]
+    # The existing boxes slide down when the push animation plays, so before it
+    # plays the newest two share the top slot; what matters is the stacking order.
     tops = [item.get_top()[1] for item in stack.items]
-    assert tops == sorted(tops, reverse=True)
+    assert tops[0] >= tops[1] - 1e-6
+    assert tops[1] > tops[2]
     stack.pop()
     assert [item.label.original_text for item in stack.items] == ["edit", "open"]
 
 
-def test_emptied_map_says_it_is_empty_again(kit):
+def test_emptied_map_shows_its_friendly_empty_slot_again(kit):
     mapping = kit.MapViz("seen")
     assert mapping._empty_hint is not None
     mapping.put(3, 0)
     assert mapping._empty_hint is None
     mapping.remove(3)
     assert mapping._empty_hint is not None
-    assert mapping._empty_hint.original_text == "(empty)"
+    labels = [text.original_text for text in kit._iter_texts(mapping._empty_hint)]
+    assert "nothing here yet" in labels
+
+
+def test_empty_stack_shows_a_slot_instead_of_a_bare_title(kit):
+    stack = kit.StackViz("history")
+    assert stack._empty_slot is not None
+    stack.push("open")
+    assert stack._empty_slot is None
+    stack.pop()
+    assert stack._empty_slot is not None
+
+
+def test_map_rows_use_a_drawn_arrow_not_a_programming_operator(kit):
+    from manim import Arrow
+
+    mapping = kit.MapViz("seen")
+    mapping.put("2", 0)
+    labels = [text.original_text for text in kit._iter_texts(mapping)]
+    assert "->" not in labels
+    assert any(isinstance(mob, Arrow) for mob in mapping.slot_rows[0].submobjects)
+
+
+# ---------------------------------------------------------------------------
+# restorable state: a scene can start where the previous one ended
+# ---------------------------------------------------------------------------
+
+def test_map_can_be_built_with_the_items_it_already_holds(kit):
+    mapping = kit.MapViz("seen", items=[("2", 0), ("7", 1)])
+    assert [row.key.original_text for row in mapping.slot_rows] == ["2", "7"]
+    assert mapping._empty_hint is None
+
+
+def test_array_can_be_built_in_a_trace_state(kit):
+    nums = kit.ArrayViz([2, 7, 11], states=["good", "dim", "default"])
+    assert nums.states == ["good", "dim", "default"]
+    assert nums.cells[0].get_stroke_color().to_hex().upper() == kit.C_GOOD.upper()
+
+
+# ---------------------------------------------------------------------------
+# layout by construction: worst-case frames never intersect
+# ---------------------------------------------------------------------------
+
+WORST_CASE_CAPTION = (
+    "Check every pair and remember the value you still need for it later"
+)
+
+
+def _worst_case_parts(kit):
+    nums = kit.ArrayViz([2, 7, 11, 15, 3, 9], at=kit.LEFT_LANE, max_width=5.4)
+    nums.pointer("left", 0)
+    nums.pointer("right", 5, level=1)
+    seen = kit.MapViz("seen", at=kit.RIGHT_LANE, max_width=5.4)
+    for value in ("2", "7", "11", "15", "3", "9"):
+        seen.put(value, value)
+    chips = kit.StatePanel({"target": 9, "need": 7, "checks so far": 6})
+    width, x = kit._caption_anchor(True)
+    caption = kit._caption_mobject(WORST_CASE_CAPTION, width)
+    caption.move_to([x, kit.ZONE_CAPTION_Y, 0.0])
+    legend = kit._legend_group()
+    return {
+        "array": nums,
+        "map": seen,
+        "chips": chips,
+        "caption": caption,
+        "legend": legend,
+    }
+
+
+def test_worst_case_parts_never_intersect(kit, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    parts = _worst_case_parts(kit)
+    boxes = {name: kit._box(mob) for name, mob in parts.items()}
+    names = sorted(boxes)
+    for index, first in enumerate(names):
+        for second in names[index + 1:]:
+            area = kit._overlap_area(boxes[first], boxes[second])
+            assert area <= 1e-6, (first, second, area, boxes[first], boxes[second])
+    for name, box in boxes.items():
+        assert box[0] >= -kit.SAFE_WIDTH / 2, (name, box)
+        assert box[1] <= kit.SAFE_WIDTH / 2, (name, box)
+        assert box[2] >= -kit.SAFE_HEIGHT / 2, (name, box)
+        assert box[3] <= kit.SAFE_HEIGHT / 2, (name, box)
+
+
+def test_worst_case_frame_passes_the_layout_audit(kit, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    parts = _worst_case_parts(kit)
+    issues = kit.audit_scene(FakeScene(list(parts.values())), strict=False)
+    assert issues == [], issues
+
+
+def test_two_structures_left_at_the_default_anchor_get_their_own_lanes(kit):
+    """Forgetting at= must never print a map over an array."""
+    nums = kit.ArrayViz([2, 7, 11])
+    seen = kit.MapViz("seen")
+    seen.put("2", 0)
+    first, second = kit._box(nums), kit._box(seen)
+    assert kit._overlap_area(first, second) <= 1e-6
+    assert nums.get_center()[0] < 0 < seen.get_center()[0]
+    assert nums.width <= kit.LANE_WIDTH + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# beat(): captions follow the voice
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.time = 0.0
+
+
+class FakeBeatScene:
+    """The only parts of a Scene that beat() touches."""
+
+    def __init__(self) -> None:
+        self.mobjects = []
+        self.renderer = _Clock()
+        self._pebble_beat = 0
+        self.captions = []
+
+    def wait(self, seconds: float = 0.0, **kwargs) -> None:
+        self.renderer.time += float(seconds)
+
+    def play(self, *animations, **kwargs) -> None:
+        self.captions.append(self._pebble_caption)
+
+
+def _write_sentence_timings(tmp_path, spans, class_name="FakeBeatScene"):
+    payload = {"_sentences": {class_name: spans}, class_name: 12.0}
+    (tmp_path / "pebble_targets.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_beat_waits_until_each_sentence_starts(kit, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    kit._TIMINGS_CACHE = None
+    _write_sentence_timings(
+        tmp_path,
+        [
+            {"text": "One.", "start": 0.0, "end": 2.0},
+            {"text": "Two.", "start": 6.0, "end": 9.0},
+        ],
+    )
+    scene = FakeBeatScene()
+    kit.beat(scene, "first sentence")
+    assert abs(scene.renderer.time - 0.0) < 0.7
+    scene.renderer.time = 2.5
+    kit.beat(scene, "second sentence")
+    assert abs(scene.renderer.time - 6.0) < 0.7
+
+
+def test_beat_never_waits_negative_time_after_an_overrun(kit, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    kit._TIMINGS_CACHE = None
+    _write_sentence_timings(
+        tmp_path, [{"text": "One.", "start": 1.0, "end": 2.0}]
+    )
+    scene = FakeBeatScene()
+    scene.renderer.time = 5.0
+    kit.beat(scene, "late")
+    assert scene.renderer.time == 5.0
+
+
+def test_beat_without_timing_behaves_like_set_caption(kit, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    kit._TIMINGS_CACHE = None
+    scene = FakeBeatScene()
+    kit.beat(scene, "no timing information")
+    assert scene.renderer.time == 0.0
+    assert scene._pebble_caption is not None
+    assert scene._pebble_beat == 1
+
+
+def test_beat_writes_one_sync_line(kit, monkeypatch, tmp_path, capsys):
+    monkeypatch.chdir(tmp_path)
+    kit._TIMINGS_CACHE = None
+    _write_sentence_timings(
+        tmp_path,
+        [
+            {"text": "One.", "start": 0.0, "end": 2.0},
+            {"text": "Two.", "start": 3.0, "end": 5.0},
+        ],
+    )
+    scene = FakeBeatScene()
+    kit.beat(scene, "first")
+    kit.beat(scene, "second")
+    out = capsys.readouterr().out
+    assert "[sync] FakeBeatScene beat 1/2" in out
+    assert "[sync] FakeBeatScene beat 2/2" in out
+    assert 'caption="second"' in out

@@ -30,6 +30,7 @@ class Scene1_Intro(Scene):
     def construct(self):
         self.title_card("Two Sum", "Find two numbers that add to a target")
         self.set_caption("Each number needs a partner")
+        self.beat("Two cards add up to nine")
         self.wait(1)
         finish_scene(self)
 
@@ -41,6 +42,7 @@ class Scene2_Trace(Scene):
         self.play(nums.intro())
         chips = StatePanel({"need": 7})
         self.play(chips.intro())
+        self.beat("Walk the array once")
         self.wait(1.6)
         finish_scene(self)
 '''

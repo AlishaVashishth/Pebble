@@ -22,6 +22,7 @@ from pebble.models import (
     GenerationResult,
     VideoRequest,
 )
+from pebble.templates.pebble_kit import split_sentences
 
 SCENE_CLASS_RE = re.compile(r"class\s+(Scene\d+_[A-Za-z0-9_]+)\s*\(Scene\)")
 
@@ -98,6 +99,7 @@ KIT_HELPERS = {
     "show_title",
     "title_card",
     "set_caption",
+    "beat",
     "show_legend",
     "step_tag",
     "result_cards",
@@ -444,7 +446,7 @@ def _check_caption_length(tree: ast.AST) -> list[str]:
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name != "set_caption":
+        if name not in {"set_caption", "beat"}:
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant):
             continue
@@ -456,6 +458,70 @@ def _check_caption_length(tree: ast.AST) -> list[str]:
                 f"line {getattr(node, 'lineno', '?')}: caption {text[:40]!r}... is "
                 f"{len(' '.join(text.split()))} characters; captions are at most 70 "
                 "characters, so split the idea or move it into the narration"
+            )
+    return problems
+
+
+def _beat_calls(construct: ast.AST) -> int:
+    """Number of beat(...) calls in one scene body."""
+    total = 0
+    for node in ast.walk(construct):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name == "beat":
+            total += 1
+    return total
+
+
+def _check_beats(tree: ast.AST, result: GenerationResult) -> list[str]:
+    """Soft: one beat per narration sentence, and a picture that keeps changing.
+
+    Never fatal: a scene that still teaches well should not fail a job over a
+    caption count. The tolerance of one sentence absorbs the model's own idea of
+    where a sentence ends (abbreviations, list commas).
+    """
+    problems: list[str] = []
+    scenes = list(result.meta.scenes)
+    order = [scene.class_name for scene in scenes]
+    narrations = {scene.class_name: scene.narration for scene in scenes}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name not in narrations:
+            continue
+        construct = next(
+            (
+                item
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name == "construct"
+            ),
+            None,
+        )
+        if construct is None:
+            continue
+        beats = _beat_calls(construct)
+        expected = len(split_sentences(narrations[node.name]))
+        if not beats:
+            problems.append(
+                f"class '{node.name}' has no beat() call: every narration sentence needs "
+                "one beat(self, \"short caption\") and its own visible change"
+            )
+            continue
+        if expected and abs(beats - expected) > 1:
+            problems.append(
+                f"class '{node.name}' has {beats} beat() call(s) but its narration is "
+                f"{expected} sentence(s); the number of beats must equal the number of "
+                "sentences"
+            )
+        position = order.index(node.name)
+        is_edge = position == 0 or position == len(order) - 1
+        # A one-sentence scene cannot hold three beats without inventing
+        # captions the voice never speaks, so only longer scenes are asked for.
+        if not is_edge and expected >= 3 and beats < 3:
+            problems.append(
+                f"class '{node.name}' has only {beats} beat() call(s); a trace scene "
+                "needs at least 3 beats so the picture keeps changing"
             )
     return problems
 
@@ -722,9 +788,10 @@ def validate_generation_split(
         hard.extend(_check_structure(manim_code, tree, result))
         hard.extend(_check_kit_rules(tree, manim_code))
         hard.extend(_check_kit_methods(tree))
-        hard.extend(_check_caption_length(tree))
         # SOFT: presentation rules: guidance for the model, never fatal.
         soft.extend(_check_config(tree))
+        soft.extend(_check_caption_length(tree))
+        soft.extend(_check_beats(tree, result))
         soft.extend(_check_no_raw_text(tree))
         soft.extend(_check_kit_structure_usage(tree))
         soft.extend(_check_intro_usage(tree))

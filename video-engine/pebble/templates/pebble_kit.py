@@ -63,6 +63,9 @@ __all__ = [
     # audit
     "audit_scene",
     "PebbleLayoutError",
+    # narration sync
+    "beat",
+    "split_sentences",
 ]
 
 # ---------------------------------------------------------------------------
@@ -231,8 +234,19 @@ EDGE_MARGIN = 0.32
 # A structure placed beside another one gets this width; centred structures get
 # the full stage width.
 LANE_X = 1.6
-LANE_WIDTH = 5.2
-STAGE_WIDTH = 8.6
+LANE_WIDTH = 5.4
+STAGE_WIDTH = 8.4
+
+# Fixed vertical bands of the frame, top to bottom: title, step tag, stage,
+# chip row, caption (with the legend in the caption band's right corner). A
+# structure may only own the stage band, so a forgotten ``at=`` can never push
+# it into the chips or the caption.
+ZONE_STAGE_HEIGHT = 4.0
+ZONE_CHIP_Y = -2.5
+ZONE_CAPTION_Y = -3.33
+ZONE_CAPTION_WIDTH = 11.4
+ZONE_CAPTION_WIDTH_WITH_LEGEND = 8.0
+ZONE_LEGEND_POS = np.array([4.3, -3.33, 0.0])
 
 
 def _width_for(at, default: float | None) -> float | None:
@@ -272,25 +286,96 @@ def _clamp_into_frame(mob, margin: float = EDGE_MARGIN):
     return mob
 
 
+def _is_stage(at) -> bool:
+    """True when the anchor was left at its default (the centre of the stage)."""
+    if at is None:
+        return True
+    try:
+        return bool(np.allclose(np.asarray(at, dtype=float), STAGE, atol=1e-6))
+    except Exception:
+        return False
+
+
+def _live_structures() -> list:
+    return [s for s in _STRUCTURES if not getattr(s, "_pebble_nested", False)]
+
+
+def _auto_slot(mob, at):
+    """Return (anchor, width cap) that cannot overlap what is already placed.
+
+    Two structures that both ask for the centre would land on top of each other
+    - the classic "map printed over the array" defect. The structure that
+    already holds the centre moves to LEFT_LANE and the newcomer takes
+    RIGHT_LANE, each fitted to the lane width. Nothing is detected after the
+    fact and nothing is retried: the slots are assigned when they are built.
+    """
+    if getattr(mob, "_pebble_nested", False):
+        return at, None
+    if not _is_stage(at):
+        return at, None
+    peers = [s for s in _live_structures() if s is not mob]
+    if not peers:
+        return STAGE, STAGE_WIDTH
+    centre_owner = None
+    for peer in peers:
+        try:
+            if abs(float(peer.get_center()[0])) < LANE_X:
+                centre_owner = peer
+                break
+        except Exception:
+            continue
+    if centre_owner is None:
+        return STAGE, STAGE_WIDTH
+    try:
+        _fit(centre_owner, LANE_WIDTH, None)
+        centre_owner.move_to(LEFT_LANE)
+        _clamp_into_frame(centre_owner)
+    except Exception:
+        pass
+    return RIGHT_LANE, LANE_WIDTH
+
+
 def _settle(mob, at, max_width=None, max_height=None):
     """Fit, place at ``at`` and keep the result inside the visible frame."""
-    if at is not None and len(_STRUCTURES) >= 1:
-        prev = _STRUCTURES[-1]
-        try:
-            at_x = float(at[0])
-            prev_x = float(prev.get_center()[0])
-            if abs(at_x) < 1.0 and abs(prev_x) < 1.0:
-                # Automatic lane placement to prevent overlap between multiple structures
-                prev.move_to(LEFT_LANE)
-                _clamp_into_frame(prev)
-                at = RIGHT_LANE
-                max_width = min(max_width or LANE_WIDTH, LANE_WIDTH)
-        except Exception:
-            pass
-    _fit(mob, _width_for(at, max_width), max_height)
-    if at is not None:
-        mob.move_to(at)
+    anchor, cap = _auto_slot(mob, at)
+    if cap is not None:
+        max_width = cap if max_width is None else min(max_width, cap)
+    height = ZONE_STAGE_HEIGHT if max_height is None else min(max_height, ZONE_STAGE_HEIGHT)
+    _fit(mob, _width_for(anchor, max_width), height)
+    if anchor is not None:
+        mob.move_to(anchor)
     return _clamp_into_frame(mob)
+
+
+STAGE_BAND_TOP = STAGE[1] + ZONE_STAGE_HEIGHT / 2
+STAGE_BAND_BOTTOM = STAGE[1] - ZONE_STAGE_HEIGHT / 2
+
+
+def _keep_in_band(owner) -> None:
+    """Lift a structure that grew past the stage band back into it.
+
+    A pointer added under a cell makes the structure taller *after* it was
+    placed. Instead of letting it run into the chip row, the structure is
+    shifted up (never resized) and its pointers follow it.
+    """
+    try:
+        bottom = float(owner.get_bottom()[1])
+        top = float(owner.get_top()[1])
+    except Exception:
+        return
+    delta = 0.0
+    if bottom < STAGE_BAND_BOTTOM:
+        delta = STAGE_BAND_BOTTOM - bottom
+    if top + delta > STAGE_BAND_TOP:
+        delta = max(0.0, STAGE_BAND_TOP - top)
+    if not delta:
+        return
+    owner.shift(UP * delta)
+    for pointer in (getattr(owner, "store", {}).get("pointers") or {}).values():
+        try:
+            pointer.mob.move_to(pointer._target(pointer.index))
+        except Exception:
+            continue
 
 
 def _panel(width, height, state="default", corner=0.18) -> RoundedRectangle:
@@ -309,6 +394,10 @@ def _panel(width, height, state="default", corner=0.18) -> RoundedRectangle:
 # Every kit structure registers itself so the audit can tell "one structure"
 # from "two elements stacked on top of each other".
 _STRUCTURES: list = []
+
+# Non-zero while one structure builds another (the tree inside a heap): the
+# child belongs to its parent and must not claim a lane for itself.
+_NESTING = 0
 
 # Chrome (titles, captions, headings) that no structure may cover.
 _RESERVED: list = []
@@ -355,6 +444,8 @@ class _IntroMixin:
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         _STRUCTURES.append(self)
+        if _NESTING:
+            self._pebble_nested = True
         _stamp(self, self)
 
     def add(self, *mobjects, **kwargs):
@@ -395,7 +486,7 @@ class _IntroMixin:
 # pointer (under an array cell / list node)
 # ---------------------------------------------------------------------------
 
-POINTER_LEVEL_GAP = 0.52
+POINTER_LEVEL_GAP = 0.55
 
 
 class Pointer:
@@ -408,9 +499,11 @@ class Pointer:
         self.index = index
         style = _style(state)
         head = Triangle(fill_color=style["stroke"], fill_opacity=1, stroke_width=0)
-        head.scale(0.15)
+        # Readable from a phone at 720p: the pointer letter is as loud as the
+        # index numbers it sits under.
+        head.scale(0.2)
         head.rotate(PI)
-        label = _text(name, size=22, color=style["stroke"])
+        label = _text(name, size=27, color=style["stroke"], weight=MEDIUM)
         self.mob = VGroup(head, label)
         self.head = head
         self.label = label
@@ -418,10 +511,12 @@ class Pointer:
         owner.add(self.mob)
         self.mob.move_to(self._target(index))
         owner.store.setdefault("pointers", {})[name] = self
+        _keep_in_band(owner)
 
     def _target(self, index: int):
         cell = self.owner.cells[index]
-        base_y = cell.get_bottom()[1] - 0.78 - self.level * POINTER_LEVEL_GAP
+        # Clears the index number printed under the cell, so neither hides the other.
+        base_y = cell.get_bottom()[1] - 0.95 - self.level * POINTER_LEVEL_GAP
         return np.array([cell.get_center()[0], base_y, 0.0])
 
     def intro(self):
@@ -454,10 +549,12 @@ class ArrayViz(_IntroMixin, VGroup):
         max_width: float | None = 8.6,
         max_height: float | None = 2.6,
         cell: float | None = None,
+        states=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.values = list(values)
+        self.states = list(states) if states is not None else ["default"] * len(self.values)
         if not self.values:
             raise ValueError("ArrayViz needs at least one value")
         self.show_index = show_index
@@ -471,7 +568,9 @@ class ArrayViz(_IntroMixin, VGroup):
             target = 8.4 if max_width is None else max(2.4, max_width)
             cell = min(1.7, max(0.62, (target - (count - 1) * 0.12) / count))
         for position, value in enumerate(self.values):
-            style = _style("default")
+            style = _style(
+                self.states[position] if position < len(self.states) else "default"
+            )
             rect = RoundedRectangle(
                 corner_radius=0.12,
                 width=cell,
@@ -495,7 +594,7 @@ class ArrayViz(_IntroMixin, VGroup):
 
         if show_index:
             for position, rect in enumerate(self.cells):
-                index_label = _text(position, size=20, color=C_MUTED)
+                index_label = _text(position, size=26, color=C_MUTED)
                 index_label.move_to(
                     np.array([rect.get_center()[0], rect.get_bottom()[1] - 0.3, 0.0])
                 )
@@ -531,6 +630,7 @@ class ArrayViz(_IntroMixin, VGroup):
         anims = []
         for index in indices:
             _check_index(index, len(self.cells), "cell index")
+            self.states[index] = state
             anims.extend(_state_anims([self.cells[index]], state))
         if len(anims) == 1:
             return anims[0]
@@ -538,6 +638,7 @@ class ArrayViz(_IntroMixin, VGroup):
 
     def set_all(self, state: str):
         _style(state)
+        self.states = [state] * len(self.cells)
         anims = _state_anims(self.cells, state)
         return AnimationGroup(*anims, lag_ratio=0)
 
@@ -584,6 +685,7 @@ class ArrayViz(_IntroMixin, VGroup):
             rect.move_to(self.get_center())
 
         self.values.append(value)
+        self.states.append("default")
         self.cells.append(rect)
         self.row.add(rect)
         self.body.add(rect)
@@ -598,7 +700,7 @@ class ArrayViz(_IntroMixin, VGroup):
 
         if self.show_index:
             pos = len(self.values) - 1
-            idx_label = _text(pos, size=20, color=C_MUTED)
+            idx_label = _text(pos, size=26, color=C_MUTED)
             idx_label.move_to(
                 np.array([rect.get_center()[0], rect.get_bottom()[1] - 0.3, 0.0])
             )
@@ -619,6 +721,8 @@ class ArrayViz(_IntroMixin, VGroup):
         val = self.values.pop(index)
         rect = self.cells.pop(index)
         text = self.value_texts.pop(index)
+        if index < len(self.states):
+            self.states.pop(index)
         anims = [FadeOut(rect, shift=DOWN * 0.2), FadeOut(text, shift=DOWN * 0.2)]
 
         if self.show_index and self.index_labels:
@@ -909,12 +1013,14 @@ class MapViz(_IntroMixin, VGroup):
     ROW_HEIGHT = 0.52
     ROW_GAP = 0.1
     HEADER = 0.78
+    MIN_ROW = 0.4
 
     def __init__(
         self,
         title: str,
         show_values: bool = True,
         max_rows: int = 6,
+        items=(),
         at=STAGE,
         max_width: float | None = None,
         max_height: float | None = None,
@@ -926,40 +1032,78 @@ class MapViz(_IntroMixin, VGroup):
         self.rows: dict = {}
         self.slot_rows: list = []
         self._miss_mob = None
-        self.target = np.array([float(at[0]), float(at[1]), 0.0])
+        anchor, cap = _auto_slot(self, at)
+        if cap is not None:
+            max_width = cap if max_width is None else min(max_width, cap)
+        self.target = np.array([float(anchor[0]), float(anchor[1]), 0.0])
+        # A full map (six rows) must still clear the chip row, so the row pitch
+        # follows the stage band instead of growing down into the chips.
+        available = (
+            ZONE_STAGE_HEIGHT if max_height is None else min(max_height, ZONE_STAGE_HEIGHT)
+        )
+        self._row_h = max(
+            self.MIN_ROW,
+            min(
+                self.ROW_HEIGHT,
+                (available - self.HEADER - 0.12) / self.max_rows - self.ROW_GAP,
+            ),
+        )
         # The panel is only as tall as the keys it holds: a big empty box with
         # one row in it reads as a mistake.
-        self.visible_rows = min(2, self.max_rows)
+        seeded = list(items.items()) if isinstance(items, dict) else list(items or ())
+        self.visible_rows = min(max(2, len(seeded)), self.max_rows)
 
         self.panel = _panel(
             self.ROW_WIDTH + 0.4, self._height_for(self.visible_rows), "default", corner=0.2
         )
-        self.heading = _text(title, size=26, color=C_TEXT, weight=MEDIUM)
+        self.heading = _text(title, size=27, color=C_TEXT, weight=MEDIUM)
         self.add(self.panel, self.heading)
         self._empty_hint = None
-        if not self.rows:
-            self._empty_hint = _text("(empty)", size=22, color=C_MUTED)
-            self.add(self._empty_hint)
+        self._show_empty()
         self._place_panel()
         # A narrow request (a map inside a compare panel) scales the whole
         # panel down; every later row must be built at that same scale or it
         # drifts up into the heading.
         self._s = 1.0
-        _fit(self, _width_for(at, max_width), max_height)
+        _fit(self, _width_for(anchor, max_width), available)
         _clamp_into_frame(self)
         self._s = float(self.panel.height) / max(
             self._height_for(self.visible_rows), 1e-6
         )
         self._place_panel()
+        # Restorable state: a scene that continues a trace starts with the keys
+        # the previous scene ended with.
+        for key, value in seeded:
+            self.put(key, value)
+
+    def _show_empty(self):
+        """A friendly empty slot instead of the word "(empty)" over the panel."""
+        slot = RoundedRectangle(
+            corner_radius=0.12,
+            width=self.ROW_WIDTH * 0.78,
+            height=self._row_h * 0.92,
+            fill_color=C_BG,
+            fill_opacity=0.3,
+            stroke_color=DIM_EDGE,
+            stroke_width=1.6,
+        )
+        label = _text("nothing here yet", size=25, color=C_MUTED)
+        label.move_to(slot.get_center())
+        hint = VGroup(slot, label)
+        self._empty_hint = hint
+        self.add(hint)
+        return hint
 
     def _height_for(self, rows: int) -> float:
-        return self.HEADER + rows * (self.ROW_HEIGHT + self.ROW_GAP) + 0.14
+        return self.HEADER + rows * (self._row_h + self.ROW_GAP) + 0.14
 
     def _place_panel(self):
         """Anchor the panel at its top edge so it grows downwards when needed."""
         s = getattr(self, "_s", 1.0)
         height = self._height_for(self.visible_rows) * s
-        top = self.target[1] + self._height_for(min(2, self.max_rows)) * s / 2
+        # Top edge of the stage band: a six-row panel then ends above the chips.
+        full = self._height_for(self.max_rows) * s
+        top = self.target[1] + min(full, ZONE_STAGE_HEIGHT * s) / 2
         if top - height < -FRAME_HALF_H + EDGE_MARGIN:
             top = -FRAME_HALF_H + EDGE_MARGIN + height
         self.panel.become(
@@ -983,21 +1127,28 @@ class MapViz(_IntroMixin, VGroup):
         bg = RoundedRectangle(
             corner_radius=0.1,
             width=self.ROW_WIDTH,
-            height=self.ROW_HEIGHT,
+            height=self._row_h,
             fill_color=C_BG,
             fill_opacity=0.55,
             stroke_color=PANEL_EDGE,
             stroke_width=1.8,
         )
-        key_text = _text(key, size=24, color=C_TEXT)
+        key_text = _text(key, size=27, color=C_TEXT)
         key_text.move_to(bg.get_left() + RIGHT * 0.95)
         parts = [bg, key_text]
         value_text = None
         if self.show_values:
-            arrow = _text("->", size=22, color=C_MUTED)
-            arrow.move_to(bg.get_center() + LEFT * 0.25)
-            value_text = _text("?" if value is None else value, size=26, color=C_ACCENT)
+            value_text = _text("?" if value is None else value, size=28, color=C_ACCENT)
             value_text.move_to(bg.get_right() + LEFT * 1.05)
+            # A drawn arrow, not the programming operator "->".
+            arrow = Arrow(
+                key_text.get_right() + RIGHT * 0.18,
+                value_text.get_left() + LEFT * 0.18,
+                buff=0,
+                color=C_MUTED,
+                stroke_width=2.4,
+                max_tip_length_to_length_ratio=0.28,
+            )
             parts.extend([arrow, value_text])
         row = VGroup(*parts)
         row.key, row.value_text, row.bg = key_text, value_text, bg
@@ -1009,8 +1160,8 @@ class MapViz(_IntroMixin, VGroup):
         y = (
             self.panel.get_top()[1]
             - self.HEADER * s
-            - self.ROW_HEIGHT * s / 2
-            - slot * (self.ROW_HEIGHT + self.ROW_GAP) * s
+            - self._row_h * s / 2
+            - slot * (self._row_h + self.ROW_GAP) * s
         )
         row.move_to(np.array([self.target[0], y, 0.0]))
 
@@ -1023,7 +1174,7 @@ class MapViz(_IntroMixin, VGroup):
                 new = _become(
                     row.value_text,
                     _text(
-                        "?" if value is None else value, size=26, color=C_ACCENT
+                        "?" if value is None else value, size=28, color=C_ACCENT
                     ).move_to(row.value_text.get_center()),
                 )
                 row.value_text = new
@@ -1059,7 +1210,7 @@ class MapViz(_IntroMixin, VGroup):
         self.rows[key] = row
         self.slot_rows.append(row)
         return AnimationGroup(
-            *start_anims, FadeIn(row, shift=DOWN * 0.08), lag_ratio=0
+            *start_anims, FadeIn(row, shift=RIGHT * 0.45), lag_ratio=0
         )
 
     def hit(self, key):
@@ -1079,7 +1230,7 @@ class MapViz(_IntroMixin, VGroup):
         # The caller's words are the message: appending a suffix turns
         # "7 not found" into "7 not found not stored".
         scale = getattr(self, "_s", 1.0)
-        new = _text(label, size=22, color=C_BAD)
+        new = _text(label, size=25, color=C_BAD)
         if scale != 1.0:
             new.scale(scale)
         new.move_to(
@@ -1090,8 +1241,17 @@ class MapViz(_IntroMixin, VGroup):
         anims = [FadeOut(self._miss_mob)] if self._miss_mob is not None else []
         self._miss_mob = new
         self.add(new)
-        anims.append(FadeIn(new, shift=UP * 0.05))
-        return AnimationGroup(*anims, lag_ratio=0)
+        # A miss shakes red so the failure reads without words.
+        shake = Succession(
+            new.animate.shift(LEFT * 0.09),
+            new.animate.shift(RIGHT * 0.18),
+            new.animate.shift(LEFT * 0.09),
+            run_time=0.45,
+        )
+        return Succession(
+            AnimationGroup(*anims, FadeIn(new, shift=UP * 0.05), lag_ratio=0),
+            shake,
+        )
 
     def remove(self, key):
         row = self.rows.pop(str(key), None)
@@ -1103,10 +1263,9 @@ class MapViz(_IntroMixin, VGroup):
         if not self.slot_rows and self._empty_hint is None:
             # An emptied map is not a blank box: say so, the way it started.
             self.visible_rows = min(2, self.max_rows)
-            self._empty_hint = _text("(empty)", size=22, color=C_MUTED)
-            self.add(self._empty_hint)
+            hint = self._show_empty()
             self._place_panel()
-            anims.append(FadeIn(self._empty_hint))
+            anims.append(FadeIn(hint))
         return AnimationGroup(*anims, lag_ratio=0)
 
     def set_state(self, key, state: str):
@@ -1141,7 +1300,12 @@ class StackViz(_IntroMixin, VGroup):
         self.add(self.title_text)
         self.items: list = []
         self._s = 1.0
-        self._box_h = 0.55
+        # Every slot must fit the stage band, so the box pitch follows capacity:
+        # a full stack still ends above the chip row.
+        room = (
+            ZONE_STAGE_HEIGHT if max_height is None else min(max_height, ZONE_STAGE_HEIGHT)
+        ) - 0.9
+        self._box_h = max(0.34, min(0.58, room / max(1, self.capacity) - 0.1))
         design_title_h = self.title_text.height
         # The given order is push order: the last value ends up on top.
         total = len(items)
@@ -1153,6 +1317,28 @@ class StackViz(_IntroMixin, VGroup):
         self._s = float(self.title_text.height) / max(design_title_h, 1e-6)
         self._box_h *= self._s
         self._layout()
+        self._empty_slot = None
+        if not self.items:
+            self._show_empty()
+
+    def _show_empty(self):
+        """An empty stack shows one friendly empty slot, not a bare title."""
+        box = RoundedRectangle(
+            corner_radius=0.1,
+            width=3.4 * self._s,
+            height=self._box_h,
+            fill_color=C_BG,
+            fill_opacity=0.3,
+            stroke_color=DIM_EDGE,
+            stroke_width=1.6,
+        )
+        box.move_to(self._slot_center(0))
+        label = _text("empty", size=25, color=C_MUTED)
+        label.move_to(box.get_center())
+        slot = VGroup(box, label)
+        self._empty_slot = slot
+        self.add(slot)
+        return slot
 
     def _layout(self):
         """Repack the boxes into one column directly under the title."""
@@ -1202,9 +1388,18 @@ class StackViz(_IntroMixin, VGroup):
             )
         # The newest item goes on top (slot 0) and the others step down: a
         # stack that grew downwards contradicted its own narration.
+        anims = []
+        if self._empty_slot is not None:
+            empty = self._empty_slot
+            self.remove(empty)
+            self._empty_slot = None
+            anims.append(FadeOut(empty))
         group = self._make_box(value, 0)
         self.items.insert(0, group)
-        anims = [FadeIn(group, shift=UP * 0.25), _state_anim(group.box, "active")]
+        # Drops in from above and lands on the pile.
+        anims.extend(
+            [FadeIn(group, shift=UP * 0.75), _state_anim(group.box, "active")]
+        )
         for slot, item in enumerate(self.items):
             if item is not group:
                 anims.append(item.animate.move_to(self._slot_center(slot)))
@@ -1214,10 +1409,14 @@ class StackViz(_IntroMixin, VGroup):
         if not self.items:
             raise ValueError("stack is empty; nothing to pop")
         group = self.items.pop(0)
-        anims = [FadeOut(group, shift=UP * 0.3)]
+        # Lifts out of the pile.
+        anims = [FadeOut(group, shift=UP * 0.75)]
         # The remaining boxes slide up into the freed slot.
         for slot, item in enumerate(self.items):
             anims.append(item.animate.move_to(self._slot_center(slot)))
+        if not self.items and self._empty_slot is None:
+            hint = self._show_empty()
+            anims.append(FadeIn(hint))
         return AnimationGroup(*anims, lag_ratio=0)
 
     def peek(self):
@@ -1260,8 +1459,11 @@ class QueueViz(_IntroMixin, VGroup):
         for value in items:
             self._make_box(value)
         self._layout()
-        _settle(self, at, max_width, max_height)
-        self._cx = at[0]
+        anchor, cap = _auto_slot(self, at)
+        if cap is not None:
+            max_width = cap if max_width is None else min(max_width, cap)
+        _settle(self, anchor, max_width, max_height)
+        self._cx = float(anchor[0])
         self._row_y = self.title_text.get_center()[1] - 1.35
         self._layout()
 
@@ -1318,7 +1520,7 @@ class QueueViz(_IntroMixin, VGroup):
         self._layout()
         return AnimationGroup(
             _state_anim(group.box, "active"),
-            FadeIn(group),
+            FadeIn(group, shift=RIGHT * 0.55),
             lag_ratio=0,
         )
 
@@ -1326,7 +1528,7 @@ class QueueViz(_IntroMixin, VGroup):
         if not self.items:
             raise ValueError("queue is empty; nothing to dequeue")
         group = self.items.pop(0)
-        anims = [FadeOut(group, shift=LEFT * 0.4)]
+        anims = [FadeOut(group, shift=LEFT * 0.55)]
         remaining = len(self.items)
         for position, item in enumerate(self.items):
             anims.append(item.animate.move_to(self._slot_center(position, remaining)))
@@ -2049,15 +2251,22 @@ class HeapViz(_IntroMixin, VGroup):
             raise ValueError("mode must be 'min' or 'max'")
         self.mode = mode
         self.store: dict = {}
-        self.tree = TreeViz(self.values, max_width=5.6, max_height=4.0)
+        # The two views are one structure: build them as nested children so they
+        # never claim a lane of their own (the heap owns the whole stage).
+        global _NESTING
+        _NESTING += 1
+        try:
+            self.tree = TreeViz(self.values, max_width=5.6, max_height=4.0)
+            self.array = ArrayViz(
+                self.values,
+                show_index=True,
+                cell=0.95,
+                max_width=4.4,
+                max_height=2.2,
+            )
+        finally:
+            _NESTING -= 1
         self.tree.move_to(LEFT * 3.1 + DOWN * 0.1)
-        self.array = ArrayViz(
-            self.values,
-            show_index=True,
-            cell=0.95,
-            max_width=4.4,
-            max_height=2.2,
-        )
         self.array.move_to(RIGHT * 3.3 + DOWN * 0.9)
         self.title_text = _text(f"{mode} heap", size=24, color=C_MUTED)
         self.title_text.move_to(RIGHT * 3.3 + UP * 0.75)
@@ -2153,7 +2362,7 @@ class StatePanel(_IntroMixin, VGroup):
         if self.side == "bottom":
             group = VGroup(*chips).arrange(RIGHT, buff=0.3)
             x = 0.0 if self._anchor is None else float(self._anchor[0])
-            y = -2.72 if self._anchor is None else float(self._anchor[1])
+            y = ZONE_CHIP_Y if self._anchor is None else float(self._anchor[1])
             group.move_to(np.array([x, y, 0.0]))
         else:
             group = VGroup(*chips).arrange(DOWN, buff=0.22, aligned_edge=LEFT)
@@ -2222,8 +2431,13 @@ class StatePanel(_IntroMixin, VGroup):
 # scene helpers
 # ---------------------------------------------------------------------------
 
-CAPTION_Y = -3.5
+# The caption band sits below the chip row and above the frame edge: room for
+# two wrapped lines, never touching the chips.
+CAPTION_Y = ZONE_CAPTION_Y
 CAPTION_CHARS = 70
+# Two wrapped lines must stay inside the band, so the caption can never grow up
+# into the chip row.
+CAPTION_BAND_HEIGHT = 0.86
 
 
 def show_title(scene, text: str):
@@ -2284,7 +2498,7 @@ def _caption_mobject(value: str, max_width: float):
     if len(value) > CAPTION_CHARS * 2:
         value = value[: CAPTION_CHARS * 2 - 1].rstrip() + "…"
 
-    single = _text(value, size=26, color=C_TEXT)
+    single = _text(value, size=25, color=C_TEXT)
     if single.width <= max_width:
         return single
 
@@ -2293,8 +2507,8 @@ def _caption_mobject(value: str, max_width: float):
     fallback = None
     for cut in range(1, len(words)):
         left, right = " ".join(words[:cut]), " ".join(words[cut:])
-        two = _text(left + "\n" + right, size=26, color=C_TEXT, line_spacing=1.05)
-        if two.height > 1.85:
+        two = _text(left + "\n" + right, size=25, color=C_TEXT, line_spacing=1.02)
+        if two.height > CAPTION_BAND_HEIGHT:
             break
         if fallback is None or abs(len(left) - len(right)) < fallback[0]:
             fallback = (abs(len(left) - len(right)), two)
@@ -2324,10 +2538,9 @@ def set_caption(scene, text: str):
         text = cleaned
 
     legend = bool(getattr(scene, "_pebble_legend", False))
-    max_width = 8.2 if legend else 11.6
+    max_width, x = _caption_anchor(legend)
     caption = _caption_mobject(text, max_width)
-    x = -1.4 if legend else 0.0
-    caption.move_to(np.array([x, CAPTION_Y, 0.0]))
+    caption.move_to(np.array([x, ZONE_CAPTION_Y, 0.0]))
     if caption.get_bottom()[1] < -SAFE_HEIGHT / 2 + 0.1:
         caption.shift(UP * (-SAFE_HEIGHT / 2 + 0.1 - caption.get_bottom()[1]))
     old = getattr(scene, "_pebble_caption", None)
@@ -2339,8 +2552,15 @@ def set_caption(scene, text: str):
     scene.play(AnimationGroup(*anims, lag_ratio=0), run_time=T_STEP)
 
 
-def show_legend(scene):
-    """Small colour legend, bottom right (scene 1 only)."""
+def _caption_anchor(with_legend: bool) -> tuple[float, float]:
+    """Width and x of the caption band (narrower and left of the legend)."""
+    if with_legend:
+        return ZONE_CAPTION_WIDTH_WITH_LEGEND, -1.45
+    return ZONE_CAPTION_WIDTH, 0.0
+
+
+def _legend_group() -> VGroup:
+    """The colour legend, placed in its own bottom-right corner."""
     entries = []
     for state, label in (
         ("active", "now"),
@@ -2351,21 +2571,27 @@ def show_legend(scene):
         style = _style(state)
         swatch = RoundedRectangle(
             corner_radius=0.05,
-            width=0.22,
-            height=0.22,
+            width=0.26,
+            height=0.26,
             fill_color=style["fill"],
             fill_opacity=1,
             stroke_color=style["stroke"],
             stroke_width=2,
         )
-        text = _text(label, size=18, color=C_MUTED)
+        text = _text(label, size=22, color=C_MUTED)
         text.next_to(swatch, RIGHT, buff=0.1)
         _reserve(text)
         entries.append(VGroup(swatch, text))
-    legend = VGroup(*entries).arrange(RIGHT, buff=0.32)
-    if legend.width > 5.2:
-        legend.scale_to_fit_width(5.2)
-    legend.move_to(np.array([3.2, -2.92, 0.0]))
+    legend = VGroup(*entries).arrange(RIGHT, buff=0.26)
+    if legend.width > 2.5:
+        legend.scale_to_fit_width(2.5)
+    legend.move_to(ZONE_LEGEND_POS)
+    return legend
+
+
+def show_legend(scene):
+    """Small colour legend, in the caption band's right corner (not scene 1 only)."""
+    legend = _legend_group()
     scene._pebble_legend = True
     scene.play(FadeIn(legend, shift=UP * 0.05), run_time=T_FAST)
 
@@ -2464,6 +2690,162 @@ def compare_panels(
     return anchors[0], anchors[1]
 
 
+# ---------------------------------------------------------------------------
+# narration beats: one spoken sentence = one caption = one visible change
+# ---------------------------------------------------------------------------
+
+TIMINGS_FILE = "pebble_targets.json"
+SENTENCES_KEY = "_sentences"
+_TIMINGS_CACHE: dict | None = None
+
+_SENTENCE_END = ".?!\u0964\u3002\uff01\uff1f"
+_ABBREVIATIONS = {
+    "e.g.",
+    "i.e.",
+    "etc.",
+    "vs.",
+    "cf.",
+    "al.",
+    "mr.",
+    "mrs.",
+    "ms.",
+    "dr.",
+    "st.",
+    "no.",
+    "fig.",
+    "approx.",
+}
+
+
+def _is_abbreviation(piece: str) -> bool:
+    tokens = piece.split()
+    return bool(tokens) and tokens[-1].lower() in _ABBREVIATIONS
+
+
+def _is_abbreviation_token(token: str) -> bool:
+    """True for "e.g.", "i.e.", "etc." and similar, so they never end a beat."""
+    cleaned = token.strip().lower()
+    if not cleaned:
+        return False
+    if cleaned in _ABBREVIATIONS:
+        return True
+    parts = cleaned.rstrip(".").split(".")
+    # A single lowercase letter per part is an initial such as the "e" and "g"
+    # of "e.g."; "notebook" has one long part and is a real sentence end.
+    return bool(parts) and all(len(part) == 1 and part.islower() for part in parts)
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split narration into spoken sentences (one sentence = one beat).
+
+    Splits on ``. ? !`` and on ``\u0964 \u3002 \uff01 \uff1f``, but not inside decimals
+    such as ``3.5`` and not after abbreviations such as ``e.g.``. This is the one
+    splitter used by the TTS timing, the ``beat`` helper and the validators.
+    """
+    value = " ".join(str(text or "").split())
+    if not value:
+        return []
+    sentences: list[str] = []
+    start = 0
+    index = 0
+    length = len(value)
+    while index < length:
+        char = value[index]
+        if char not in _SENTENCE_END:
+            index += 1
+            continue
+        if (
+            char == "."
+            and 0 < index < length - 1
+            and value[index - 1].isdigit()
+            and value[index + 1].isdigit()
+        ):
+            index += 1
+            continue
+        end = index + 1
+        while end < length and value[end] in _SENTENCE_END:
+            end += 1
+        token_start = index
+        while token_start > 0 and (
+            value[token_start - 1].isalnum() or value[token_start - 1] == "."
+        ):
+            token_start -= 1
+        piece = value[start:end].strip()
+        if (
+            piece
+            and not _is_abbreviation(piece)
+            and not _is_abbreviation_token(value[token_start:end])
+        ):
+            sentences.append(piece)
+            start = end
+        index = end
+    tail = value[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
+
+
+def load_scene_timings() -> dict:
+    """Scene class name -> {"seconds": float | None, "sentences": [spans]}."""
+    global _TIMINGS_CACHE
+    if _TIMINGS_CACHE is None:
+        raw: dict = {}
+        path = Path(TIMINGS_FILE)
+        if path.exists():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    raw = loaded
+            except (OSError, ValueError):
+                raw = {}
+        spans = raw.get(SENTENCES_KEY) if isinstance(raw, dict) else None
+        _TIMINGS_CACHE = spans if isinstance(spans, dict) else {}
+    return _TIMINGS_CACHE
+
+
+def scene_clock(scene) -> float:
+    """Seconds of animation already played in this scene."""
+    renderer = getattr(scene, "renderer", None)
+    value = getattr(renderer, "time", None) if renderer is not None else None
+    if value is None:
+        value = getattr(scene, "time", 0.0)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def beat(scene, caption: str) -> None:
+    """Show the caption of the current spoken sentence at the right moment.
+
+    One call per narration sentence, in order. The call waits until the clock
+    reaches the recorded start of that sentence (never a negative wait), then
+    crossfades the caption in. Without timing information it behaves exactly
+    like ``set_caption`` and never raises.
+    """
+    index = int(getattr(scene, "_pebble_beat", 0))
+    scene._pebble_beat = index + 1
+    spans = load_scene_timings().get(type(scene).__name__) or []
+    planned = None
+    if index < len(spans):
+        try:
+            planned = float(spans[index].get("start"))
+        except (AttributeError, TypeError, ValueError):
+            planned = None
+    if planned is not None:
+        now = scene_clock(scene)
+        if planned > now:
+            scene.wait(planned - now)
+        shown = " ".join(str(caption).split())
+        print(
+            f"[sync] {type(scene).__name__} beat {index + 1}/{len(spans)} "
+            f"planned={planned:.1f}s actual={scene_clock(scene):.1f}s "
+            f'caption="{shown[:60]}"',
+            flush=True,
+        )
+    set_caption(scene, caption)
+
+
 # The reference documents these helpers as ``self.show_title(...)`` etc., so bind
 # them onto Manim's Scene class. They keep their module-level names too.
 def _install_scene_methods() -> None:
@@ -2475,6 +2857,7 @@ def _install_scene_methods() -> None:
         step_tag,
         result_cards,
         compare_panels,
+        beat,
     ):
         setattr(Scene, helper.__name__, helper)
 
