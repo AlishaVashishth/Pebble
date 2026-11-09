@@ -6,7 +6,12 @@ import pytest
 
 from pebble.config import Settings, voice_for_language
 from pebble.errors import ConfigError, TTSError
-from pebble.tts import sanitize_narration, synthesize_scene
+from pebble.tts import (
+    estimate_sentence_timings,
+    sanitize_narration,
+    synthesize_scene,
+    synthesize_scene_sentences,
+)
 from tests.conftest import wav_bytes
 
 SPEECH_SETTINGS = Settings(azure_speech_key="dummy-key", azure_speech_region="dummy-region")
@@ -109,6 +114,84 @@ def test_empty_narration_is_rejected(monkeypatch, tmp_path):
     monkeypatch.setattr("pebble.tts._synth_audio", lambda *a: wav_bytes(0.3))
     with pytest.raises(TTSError):
         synthesize_scene("##  ", tmp_path / "a.wav", "voice", SPEECH_SETTINGS)
+
+
+# ---------------------------------------------------------------------------
+# per-sentence timing (Step 2B), with mocks
+# ---------------------------------------------------------------------------
+
+
+def test_per_sentence_synthesis_records_each_sentence_start(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    def fake_synth(text, voice, settings):
+        calls.append(text)
+        return wav_bytes(0.5)
+
+    monkeypatch.setattr("pebble.tts._synth_audio", fake_synth)
+
+    out = tmp_path / "01_Scene1.wav"
+    duration, sentences = synthesize_scene_sentences(
+        "One. Two. Three.", out, "en-IN-NeerjaNeural", SPEECH_SETTINGS
+    )
+
+    assert calls == ["One.", "Two.", "Three."]
+    assert out.exists()
+    assert [round(item["start"], 2) for item in sentences] == [0.0, 0.75, 1.5]
+    assert [item["text"] for item in sentences] == ["One.", "Two.", "Three."]
+    assert abs(duration - sentences[-1]["end"]) < 0.1
+
+
+def test_per_sentence_failure_falls_back_to_one_call(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    def flaky(text, voice, settings):
+        calls.append(text)
+        if text == "Two.":
+            raise TTSError("429 Too Many Requests")
+        return wav_bytes(0.5)
+
+    monkeypatch.setattr("pebble.tts._synth_audio", flaky)
+
+    out = tmp_path / "02_Scene2.wav"
+    duration, sentences = synthesize_scene_sentences(
+        "One. Two. Three.", out, "voice", SPEECH_SETTINGS
+    )
+
+    # The whole scene was re-synthesized in a single call...
+    assert calls[-1] == "One. Two. Three."
+    # ...and the sentence starts are estimated proportionally.
+    assert [item["text"] for item in sentences] == ["One.", "Two.", "Three."]
+    assert sentences[0]["start"] == 0.0
+    starts = [item["start"] for item in sentences]
+    assert starts == sorted(starts)
+    assert abs(duration - 0.5) < 0.1
+
+
+def test_estimate_weights_longer_sentences_more():
+    spans = estimate_sentence_timings(["Short.", "A much longer sentence here."], 10.0)
+    first = spans[0]["end"] - spans[0]["start"]
+    second = spans[1]["end"] - spans[1]["start"]
+    assert second > first
+    assert spans[0]["start"] == 0.0
+    assert abs(spans[-1]["end"] - 10.0) < 1e-6
+
+
+def test_a_single_sentence_scene_uses_one_call(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    def fake_synth(text, voice, settings):
+        calls.append(text)
+        return wav_bytes(0.4)
+
+    monkeypatch.setattr("pebble.tts._synth_audio", fake_synth)
+    duration, sentences = synthesize_scene_sentences(
+        "Only one sentence here.", tmp_path / "a.wav", "voice", SPEECH_SETTINGS
+    )
+    assert calls == ["Only one sentence here."]
+    assert len(sentences) == 1
+    assert sentences[0]["start"] == 0.0
+    assert abs(sentences[0]["end"] - duration) < 0.05
 
 
 def test_cancellation_text_works_without_a_from_result_helper(monkeypatch):

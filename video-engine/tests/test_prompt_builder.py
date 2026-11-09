@@ -75,11 +75,11 @@ def test_unknown_style_falls_back_to_beginner_friendly(env_info, caplog):
     )
     name, text = get_style("super_speedy")
     assert name == "beginner_friendly"
-    assert text.startswith("Assume the viewer is new to the topic.")
+    assert text.startswith("Explain to a curious 5-year-old")
 
     prompt = build_prompt(request, env_info)
     assert "EXPLANATION STYLE: beginner_friendly" in prompt
-    assert "Assume the viewer is new to the topic." in prompt
+    assert "Explain to a curious 5-year-old" in prompt
 
 
 def test_latex_block_switches_with_env(env_info, latex_env_info):
@@ -114,8 +114,17 @@ def test_input_blocks(env_info):
 
 def test_diagram_recipes_are_included(env_info):
     prompt = build_prompt(load_sample("two_sum.json"), env_info)
-    assert "CODE VISUALIZATION VOCABULARY" in prompt
+    assert "KIT PLAYBOOKS" in prompt
+    assert "ANALOGY BANK" in prompt
     assert "CONSISTENCY REQUIREMENTS" in prompt
+
+
+def test_recipes_no_longer_teach_drawing_code(env_info):
+    prompt = build_prompt(load_sample("two_sum.json"), env_info)
+    assert "CODE VISUALIZATION VOCABULARY" not in prompt
+    assert "pseudocode lines as a right-aligned VGroup" not in prompt
+    assert "SurroundingRectangle (highlight) that jumps" not in prompt
+    assert "highlight-the-current-line" not in prompt
 
 
 def test_kit_reference_is_included(env_info):
@@ -130,8 +139,17 @@ def test_prompt_no_longer_talks_about_drawing_code(env_info):
     assert "code_font" not in prompt
     assert "for code shown on screen" not in prompt
     assert "Code class" not in prompt.split("=== THE VISUAL KIT")[0]
-    assert "NOTHING THAT LOOKS LIKE CODE" in prompt
+    assert "Never show code on screen" in prompt
     assert "font=\"" not in prompt
+
+
+def test_teaching_order_and_beats_are_in_the_prompt(env_info):
+    prompt = build_prompt(load_sample("two_sum.json"), env_info)
+    assert "=== HOW TO TEACH ===" in prompt
+    assert "HOOK" in prompt and "BRUTE FORCE" in prompt and "THE AHA" in prompt
+    assert "=== BEATS AND MOTION ===" in prompt
+    assert "call beat(self, \"short caption\") once per sentence" in prompt
+    assert "recap" in prompt.lower()
 
 
 def test_unknown_placeholder_raises(monkeypatch, tmp_path, env_info):

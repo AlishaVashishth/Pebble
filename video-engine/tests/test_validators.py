@@ -410,6 +410,7 @@ PANEL_SCENE = (
     "        wrong = ArrayViz([3, 2, 4], at=left_at, max_width=5.2)\n"
     "        right = ArrayViz([3, 2, 4], at=right_at, max_width=5.2)\n"
     "        self.play(wrong.intro(), right.intro())\n"
+    "        beat(self, \"Fix the last index\")\n"
     "        finish_scene(self)\n"
 )
 
@@ -501,6 +502,56 @@ def test_state_panel_does_not_need_a_panel_anchor(env_info, corrected_request):
         env_info,
     )
     assert not any("needs at=left_at" in problem for problem in problems), problems
+
+
+# ---------------------------------------------------------------------------
+# beats are a soft, never-fatal teaching check
+# ---------------------------------------------------------------------------
+
+
+def test_scene_without_beats_is_only_a_warning(env_info, verified_request):
+    from pebble.validators import validate_generation_split
+
+    script = VALID_MANIM.replace('        self.beat("Walk the array once")\n', "")
+    assert script != VALID_MANIM
+    problems = validate_generation_split(
+        parse_response(make_response(manim_code=script)), verified_request, env_info
+    )
+    assert problems.hard == []
+    assert any("no beat()" in problem for problem in problems.soft)
+
+
+def test_beat_count_must_match_the_narration(env_info, verified_request):
+    from pebble.validators import validate_generation_split
+
+    meta = _meta(
+        scenes=[
+            {"scene_id": 1, "class_name": "Scene1_Intro", "title": "a", "narration": "n"},
+            {
+                "scene_id": 2,
+                "class_name": "Scene2_Trace",
+                "title": "b",
+                "narration": "One. Two. Three. Four. Five.",
+            },
+        ]
+    )
+    problems = validate_generation_split(
+        parse_response(make_response(meta=meta)), verified_request, env_info
+    )
+    assert problems.hard == []
+    assert any("beat() call(s)" in problem for problem in problems.soft)
+
+
+def test_overlong_beat_caption_is_reported(env_info, verified_request):
+    long_line = (
+        "Check every pair of numbers and remember the value you still need for each of them"
+    )
+    assert len(long_line) > 70
+    bad = VALID_MANIM.replace(
+        'self.beat("Walk the array once")', f'self.beat("{long_line}")'
+    )
+    problems = _problems(make_response(manim_code=bad), verified_request, env_info)
+    assert any("at most 70 characters" in problem for problem in problems), problems
 
 
 def test_prose_parenthetical_is_not_mistaken_for_a_call(env_info, verified_request):

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import time
-from dataclasses import dataclass
+import wave
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -14,11 +16,16 @@ from pebble.cost import CostTracker
 from pebble.errors import ConfigError, TTSError
 from pebble.models import GenerationResult
 from pebble.mux import probe_duration
+from pebble.templates.pebble_kit import split_sentences
 from pebble.workspace import JobWorkspace
 
 logger = logging.getLogger(__name__)
 
 MAX_TRANSIENT_RETRIES = 2
+
+# Gap between two sentences inside one scene WAV. It is the pause the narration
+# would have had anyway, and it makes each sentence's start measurable.
+PER_SENTENCE_GAP = 0.25
 
 _EMPHASIS_RE = re.compile(r"(?<![\w])_([^_\n]+)_(?![\w])")
 _SPACE_RE = re.compile(r"\s+")
@@ -41,6 +48,9 @@ class SceneAudio:
     audio_path: Path
     duration: float
     text: str
+    # Optional per-sentence timing: [{"text", "start", "end"}]. Additive, so
+    # workspaces and old callers keep working unchanged.
+    sentences: list[dict] = field(default_factory=list)
 
 
 def sanitize_narration(text: str) -> str:
@@ -146,6 +156,134 @@ def _synthesize_with_retries(text: str, voice: str, settings: Settings) -> bytes
     raise TTSError(f"speech synthesis failed after retries: {last_error}")
 
 
+def _write_audio(out_path: Path, audio: bytes) -> float:
+    if not audio:
+        raise TTSError(f"Azure Speech returned no audio for {out_path.stem}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(audio)
+    return probe_duration(out_path)
+
+
+def estimate_sentence_timings(
+    sentences: list[str], total: float, gap: float = PER_SENTENCE_GAP
+) -> list[dict]:
+    """Spread `total` seconds over sentences: characters plus a pause per end."""
+    if not sentences:
+        return []
+    total = max(0.0, float(total))
+    weights = [max(1, len(sentence)) + 12 for sentence in sentences]
+    available = max(0.0, total - gap * (len(sentences) - 1))
+    scale = available / sum(weights)
+    spans: list[dict] = []
+    clock = 0.0
+    for position, (sentence, weight) in enumerate(zip(sentences, weights)):
+        start = clock
+        clock += weight * scale
+        spans.append(
+            {
+                "text": sentence,
+                "start": round(start, 3),
+                "end": round(clock, 3),
+            }
+        )
+        if position < len(sentences) - 1:
+            clock += gap
+    return spans
+
+
+def _wav_parts(data: bytes) -> tuple[int, int, int, bytes]:
+    """(channels, sample width, frame rate, raw frames) of a WAV blob."""
+    with wave.open(io.BytesIO(data), "rb") as handle:
+        return (
+            handle.getnchannels(),
+            handle.getsampwidth(),
+            handle.getframerate(),
+            handle.readframes(handle.getnframes()),
+        )
+
+
+def join_wavs(
+    chunks: list[bytes], gap: float = PER_SENTENCE_GAP
+) -> tuple[bytes, list[tuple[float, float]]]:
+    """Join WAV blobs with `gap` seconds of silence; return bytes and spans."""
+    parts = [_wav_parts(chunk) for chunk in chunks]
+    channels, width, rate = parts[0][0], parts[0][1], parts[0][2]
+    for other in parts[1:]:
+        if other[:3] != (channels, width, rate):
+            raise TTSError("per-sentence audio arrived in mixed formats")
+    frame_bytes = max(1, width * channels)
+    silence = b"\x00" * (int(gap * rate) * frame_bytes)
+    frames = bytearray()
+    spans: list[tuple[float, float]] = []
+    clock = 0.0
+    for position, part in enumerate(parts):
+        if position:
+            frames += silence
+            clock += gap
+        payload = part[3]
+        start = clock
+        clock += len(payload) / float(frame_bytes * rate)
+        frames += payload
+        spans.append((start, clock))
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(width)
+        handle.setframerate(rate)
+        handle.writeframes(bytes(frames))
+    return buffer.getvalue(), spans
+
+
+def _single_call(
+    text: str, out_path: Path, voice: str, settings: Settings
+) -> tuple[float, list[dict]]:
+    """Old behaviour: one call per scene, sentence starts estimated by length."""
+    audio = _synthesize_with_retries(text, voice, settings)
+    duration = _write_audio(out_path, audio)
+    return duration, estimate_sentence_timings(split_sentences(text), duration)
+
+
+def synthesize_scene_sentences(
+    narration: str, out_path: Path, voice: str, settings: Settings
+) -> tuple[float, list[dict]]:
+    """Write one scene's narration (sentence by sentence) and return its timing.
+
+    Each sentence is synthesized with the same voice and settings and the pieces
+    are joined with a short silence into the SAME WAV file as before, so muxing
+    and stitching are untouched. Any failure (rate limit, SDK error, mixed audio
+    formats) falls back to the single call and proportional estimates: a job is
+    never lost because of caption timing.
+    """
+    text = sanitize_narration(narration)
+    if not text:
+        raise TTSError(f"narration for {out_path.stem} is empty after sanitizing")
+
+    sentences = split_sentences(text)
+    if len(sentences) < 2:
+        return _single_call(text, out_path, voice, settings)
+
+    try:
+        chunks = [
+            _synthesize_with_retries(sentence, voice, settings)
+            for sentence in sentences
+        ]
+        combined, spans = join_wavs(chunks, PER_SENTENCE_GAP)
+    except Exception as exc:  # noqa: BLE001 - timing must never fail the job
+        logger.warning(
+            "%s: per-sentence synthesis failed (%s); falling back to one call",
+            out_path.stem,
+            exc,
+        )
+        return _single_call(text, out_path, voice, settings)
+
+    duration = _write_audio(out_path, combined)
+    timings = [
+        {"text": sentence, "start": round(start, 3), "end": round(end, 3)}
+        for sentence, (start, end) in zip(sentences, spans)
+    ]
+    return duration, timings
+
+
 def synthesize_scene(
     narration: str, out_path: Path, voice: str, settings: Settings
 ) -> float:
@@ -155,12 +293,7 @@ def synthesize_scene(
         raise TTSError(f"narration for {out_path.stem} is empty after sanitizing")
 
     audio = _synthesize_with_retries(text, voice, settings)
-    if not audio:
-        raise TTSError(f"Azure Speech returned no audio for {out_path.stem}")
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(audio)
-    return probe_duration(out_path)
+    return _write_audio(out_path, audio)
 
 
 def narrate_scenes(
@@ -180,7 +313,9 @@ def narrate_scenes(
     for index, scene in enumerate(result.scenes, start=1):
         out_path = workspace.audio_dir / f"{index:02d}_{scene.class_name}.wav"
         started = time.monotonic()
-        duration = synthesize_scene(scene.narration, out_path, voice, settings)
+        duration, sentences = synthesize_scene_sentences(
+            scene.narration, out_path, voice, settings
+        )
         text = sanitize_narration(scene.narration)
         item = SceneAudio(
             index=index,
@@ -188,6 +323,7 @@ def narrate_scenes(
             audio_path=out_path,
             duration=duration,
             text=text,
+            sentences=sentences,
         )
         audio.append(item)
         if cost is not None:

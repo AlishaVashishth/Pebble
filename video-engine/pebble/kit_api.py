@@ -64,6 +64,7 @@ def get_allowed_api_reference() -> str:
     helpers = [
         "show_title",
         "title_card",
+        "beat",
         "set_caption",
         "show_legend",
         "step_tag",

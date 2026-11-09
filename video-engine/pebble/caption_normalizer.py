@@ -23,8 +23,8 @@ def normalize_caption_text(text: str, max_len: int = 70) -> str:
 
 
 def normalize_captions(code: str, max_len: int = 70) -> str:
-    """Scan Python code for set_caption calls and normalize any caption > max_len chars."""
-    if "set_caption" not in code:
+    """Clamp caption text passed to set_caption or beat calls at word boundaries."""
+    if "set_caption" not in code and "beat" not in code:
         return code
 
     try:
@@ -36,7 +36,9 @@ def normalize_captions(code: str, max_len: int = 70) -> str:
             norm = normalize_caption_text(content, max_len)
             return f"{prefix}{quote}{norm}{quote}{suffix}"
 
-        pattern = re.compile(r'(set_caption\s*\(\s*)([\'"])(.*?)\2(\s*\))', re.S)
+        pattern = re.compile(
+            r'((?:set_caption|beat)\s*\(\s*)([\'"])(.*?)\2(\s*[,)])', re.S
+        )
         return pattern.sub(_repl, code)
 
     replacements: list[tuple[str, str]] = []
@@ -45,7 +47,7 @@ def normalize_captions(code: str, max_len: int = 70) -> str:
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name != "set_caption":
+        if name not in {"set_caption", "beat"}:
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant):
             continue

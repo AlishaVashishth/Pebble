@@ -56,8 +56,20 @@ class PipelineResult:
 
 
 def write_targets(workspace: JobWorkspace, audio: list[SceneAudio]) -> Path:
-    """Per-scene on-screen target: narration length plus the mux hold."""
-    targets = {item.class_name: round(item.duration + HOLD, 3) for item in audio}
+    """Per-scene on-screen target: narration length plus the mux hold.
+
+    The ``_sentences`` entry is optional and additive: it carries each scene's
+    per-sentence timing so ``beat()`` can show a caption on the right sentence.
+    Readers that only look up scene names skip it.
+    """
+    targets: dict[str, Any] = {
+        item.class_name: round(item.duration + HOLD, 3) for item in audio
+    }
+    sentences = {
+        item.class_name: list(item.sentences) for item in audio if item.sentences
+    }
+    if sentences:
+        targets["_sentences"] = sentences
     workspace.targets_path.write_text(
         json.dumps(targets, indent=2) + "\n", encoding="utf-8"
     )
