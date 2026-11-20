@@ -3,7 +3,7 @@ import { getSavedSession, clearSession } from '../lib/auth.ts';
 import { fetchCurrentUser } from "../lib/auth.ts";
 import { UNAUTHORIZED_EVENT } from "../lib/api.ts";
 
-export type AppRoute = 'landing' | 'home';
+export type AppRoute = 'landing' | 'home' | 'playground';
 
 // When the app script loads: if URL hash is NOT "#home", clear the saved mock session
 // so reloading the landing page always starts fresh and logged out
@@ -18,10 +18,9 @@ export function useAppRoute(onNeedLogin?: () => void) {
   const [route, setRoute] = useState<AppRoute>(() => {
     if (typeof window === 'undefined') return 'landing';
     const hash = window.location.hash.toLowerCase();
-    if (hash === '#home') {
-      const session = getSavedSession();
-      if (session) return 'home';
-    }
+    const session = getSavedSession();
+    if (hash === '#home' && session) return 'home';
+    if (hash === '#playground' && session) return 'playground';
     return 'landing';
   });
 
@@ -34,7 +33,17 @@ export function useAppRoute(onNeedLogin?: () => void) {
       if (session) {
         setRoute('home');
       } else {
-        // #home accessed without session -> route to landing and open #login overlay
+        setRoute('landing');
+        if (onNeedLogin) {
+          onNeedLogin();
+        } else {
+          window.location.hash = '#login';
+        }
+      }
+    } else if (hash === '#playground') {
+      if (session) {
+        setRoute('playground');
+      } else {
         setRoute('landing');
         if (onNeedLogin) {
           onNeedLogin();
@@ -64,7 +73,7 @@ export function useAppRoute(onNeedLogin?: () => void) {
   useEffect(() => {
     const h = () => {
       clearSession();
-      if (window.location.hash === '#home')
+      if (window.location.hash === '#home' || window.location.hash === '#playground')
         history.pushState(null, '', window.location.pathname + window.location.search);
       setRoute('landing');
       onNeedLogin?.();
@@ -79,8 +88,13 @@ export function useAppRoute(onNeedLogin?: () => void) {
         history.pushState(null, '', '#home');
       }
       setRoute('home');
+    } else if (target === 'playground') {
+      if (window.location.hash !== '#playground') {
+        history.pushState(null, '', '#playground');
+      }
+      setRoute('playground');
     } else {
-      if (window.location.hash === '#home') {
+      if (window.location.hash === '#home' || window.location.hash === '#playground') {
         const cleanUrl = window.location.pathname + window.location.search;
         history.pushState(null, '', cleanUrl);
       }
@@ -90,7 +104,7 @@ export function useAppRoute(onNeedLogin?: () => void) {
 
   const logout = useCallback(() => {
     clearSession();
-    if (window.location.hash === '#home') {
+    if (window.location.hash === '#home' || window.location.hash === '#playground') {
       const cleanUrl = window.location.pathname + window.location.search;
       history.pushState(null, '', cleanUrl);
     }

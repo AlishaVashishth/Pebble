@@ -11,9 +11,10 @@ import { useChat } from '../../hooks/useChat.ts';
 interface HomePageProps {
   onLogout: () => void;
   onGoToLanding: () => void;
+  onGoToPlayground?: () => void;
 }
 
-export const HomePage: React.FC<HomePageProps> = ({ onLogout, onGoToLanding }) => {
+export const HomePage: React.FC<HomePageProps> = ({ onLogout, onGoToLanding, onGoToPlayground }) => {
   const {
     sessions,
     activeSession,
@@ -56,6 +57,7 @@ export const HomePage: React.FC<HomePageProps> = ({ onLogout, onGoToLanding }) =
           onQuickStarter={(q) => sendMessage(q)}
           onLogout={onLogout}
           onLogoClick={onGoToLanding}
+          onOpenPlayground={onGoToPlayground}
         />
 
         {/* Center / Main Chat Stage */}
