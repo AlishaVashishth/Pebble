@@ -81,7 +81,7 @@ def _apply_resource_limits() -> None:
 
 def run_subprocess(
     cmd: List[str],
-    stdin_text: str = "",
+    stdin_text: Optional[str] = None,
     timeout_seconds: int = 10,
     cwd: Optional[str] = None,
     env: Optional[dict] = None,
@@ -100,11 +100,13 @@ def run_subprocess(
     preexec = _apply_resource_limits if is_unix else None
     sanitized_env = get_sanitized_env(env)
 
+    stdin_bytes = (stdin_text or "").encode("utf-8", errors="replace") if stdin_text is not None else None
+
     start = time.perf_counter()
     try:
         proc = subprocess.run(
             cmd,
-            input=stdin_text.encode("utf-8", errors="replace"),
+            input=stdin_bytes,
             capture_output=True,
             timeout=timeout_seconds,
             cwd=cwd,

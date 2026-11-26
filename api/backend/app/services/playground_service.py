@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.core.code_detection import detect_underlying_algorithm
 from backend.app.core.dsa_keywords import contains_dsa_keyword, has_prompt_injection
+from backend.app.core.language import languages_match, normalize_language
 from backend.app.integrations.llm import get_llm_provider
 from backend.app.repositories.solution_repository import SolutionRepository
 from backend.app.schemas.playground import PlaygroundRequest, PlaygroundResponse
@@ -73,33 +74,50 @@ Output ONLY valid JSON with this exact schema (no markdown):
 
 _SOLVE_SYSTEM = """You are Pebble, a friendly DSA tutor. The user has described a programming problem.
 Your task:
-1. Write a clean, working solution in the requested language.
+1. Write a clean, complete, and runnable solution in the requested language.
+   - For Java: provide a complete `public class Main` (or `Solution`) with `public static void main(String[] args)`. If input is given or described, read from standard input using `java.util.Scanner` or `BufferedReader` and print the output using `System.out.println`.
+   - For Python: provide clean, executable Python code. If input is given, read using `sys.stdin` or `input()` and print the result.
+   - For C++: provide `#include <iostream>` and `int main()` reading with `std::cin` and printing with `std::cout`.
 2. Write a concise, beginner-friendly explanation (3-6 sentences).
 3. Write a one-sentence approach summary.
 
-Output ONLY valid JSON with this exact schema (no markdown):
+Output ONLY valid JSON with this exact schema (no markdown, no extra text):
 {
   "approach": "<one sentence summary>",
   "explanation": "<step-by-step beginner-friendly explanation>",
-  "solution_code": "<clean solution code>"
+  "solution_code": "<complete runnable code>"
 }"""
 
 
 def _safe_json_parse(raw: str) -> Optional[dict]:
-    """Strip markdown fences and parse JSON."""
+    """Strip markdown fences and parse JSON robustly."""
     import json
 
+    if not raw:
+        return None
     text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        lines = lines[1:] if lines[0].startswith("```") else lines
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
     try:
         return json.loads(text)
     except Exception:
-        return None
+        pass
+
+    if "```" in text:
+        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except Exception:
+                pass
+
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace != -1 and last_brace > first_brace:
+        try:
+            return json.loads(text[first_brace : last_brace + 1])
+        except Exception:
+            pass
+
+    return None
 
 
 class PlaygroundService:
@@ -291,7 +309,7 @@ class PlaygroundService:
                 return None
 
             # 1. Exact solution match already returned in resolve
-            if resolve.solution and resolve.solution.language.lower() == language.lower():
+            if resolve.solution and languages_match(resolve.solution.language, language):
                 return PlaygroundResponse(
                     status="ok",
                     mode="solve",
@@ -319,7 +337,7 @@ class PlaygroundService:
                 if solutions:
                     # STRICT REQUIREMENT: Only match the exact requested language
                     target_sol = next(
-                        (s for s in solutions if s.language.lower() == language.lower()),
+                        (s for s in solutions if languages_match(s.language, language)),
                         None,
                     )
                     if target_sol:
@@ -370,7 +388,14 @@ class PlaygroundService:
             raw = provider.complete(_SOLVE_SYSTEM, user_prompt)
             parsed = _safe_json_parse(raw)
             if parsed:
-                sol_code = parsed.get("solution_code") or ""
+                sol_code = (parsed.get("solution_code") or "").strip()
+                if sol_code.startswith("```"):
+                    lines = sol_code.splitlines()
+                    lines = lines[1:] if lines[0].startswith("```") else lines
+                    if lines and lines[-1].strip().startswith("```"):
+                        lines = lines[:-1]
+                    sol_code = "\n".join(lines).strip()
+
                 expl = parsed.get("explanation") or parsed.get("reply") or f"Algorithm solution for {problem_text}."
                 appr = parsed.get("approach") or f"Optimal algorithm for {problem_text}."
                 if not sol_code:

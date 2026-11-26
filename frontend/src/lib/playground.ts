@@ -27,6 +27,38 @@ export interface PlaygroundResponse {
   error?: string;
 }
 
+export interface CallStackFrame {
+  func_name: string;
+  args: Record<string, unknown>;
+  return_value?: unknown;
+  depth: number;
+  frame_id?: string;
+  parent_frame_id?: string;
+  local_vars?: Record<string, unknown>;
+  line_number?: number;
+  status?: 'active' | 'returning';
+}
+
+export interface LinkedListNode {
+  id: string;
+  val: unknown;
+  next_id?: string | null;
+}
+
+export interface TreeNode {
+  id: string;
+  val: unknown;
+  left_id?: string | null;
+  right_id?: string | null;
+}
+
+export interface GraphData {
+  nodes: Array<{ id: string; label?: string; [key: string]: unknown }>;
+  edges: Array<{ source: string; target: string; [key: string]: unknown }>;
+  visited: string[];
+  current_node?: string | null;
+}
+
 export interface TraceStep {
   step: number;
   line_number: number;
@@ -39,6 +71,28 @@ export interface TraceStep {
   operation_type?: string;
   explanation?: string;
   changed_vars?: string[];
+
+  // Universal DSA Structure Enriched Fields
+  data_structure_type?: 'array' | 'string' | 'hashmap' | 'set' | 'stack' | 'queue' | 'linked_list' | 'tree' | 'graph' | 'recursion';
+  string_view?: {
+    text: string;
+    chars: string[];
+    pointers?: Record<string, number>;
+    window?: [number, number] | null;
+  };
+  hash_map_view?: {
+    entries: Array<{ key: string; value: unknown; was_updated?: boolean }>;
+    size: number;
+  };
+  stack_view?: unknown[];
+  queue_view?: unknown[];
+  linked_list_view?: LinkedListNode[];
+  tree_view?: TreeNode[];
+  call_stack?: CallStackFrame[];
+  call_depth?: number;
+  event_type?: string;
+  return_value?: unknown;
+  graph_view?: GraphData;
 }
 
 export interface PlaygroundPreset {

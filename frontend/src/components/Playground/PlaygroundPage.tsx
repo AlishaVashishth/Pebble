@@ -230,15 +230,33 @@ export const PlaygroundPage: React.FC<PlaygroundPageProps> = ({ onGoBack }) => {
           controller.signal
         );
 
+        if (solveRes.status === 'error') {
+          setErrorMsg(solveRes.error || 'Failed to solve problem. Please check your problem description.');
+          setUiState('error');
+          return;
+        }
+
         setResult(solveRes);
 
-        // If a solution code was generated, execute it in the sandbox
-        if (solveRes.status === 'ok' && solveRes.solution_code && !solveRes.solution_code.startsWith('# LLM not configured')) {
+        // If a solution code was generated, populate code state and execute it in the sandbox
+        if (solveRes.solution_code && !solveRes.solution_code.startsWith('# LLM not configured')) {
+          const generatedCode = solveRes.solution_code;
+          if (code && code.trim().length > 0 && code.trim() !== generatedCode.trim()) {
+            const confirmed = window.confirm(
+              'A new solution has been generated. Replace the code in the editor with this solution?'
+            );
+            if (confirmed) {
+              setCode(generatedCode);
+            }
+          } else {
+            setCode(generatedCode);
+          }
+
           try {
             const execRes = await executeCode(
               {
                 language,
-                code: solveRes.solution_code,
+                code: generatedCode,
                 custom_input: customInput.trim() || undefined,
               },
               controller.signal
@@ -247,8 +265,8 @@ export const PlaygroundPage: React.FC<PlaygroundPageProps> = ({ onGoBack }) => {
             if (execRes.trace_steps && execRes.trace_steps.length > 0) {
               setSteps(execRes.trace_steps);
             }
-          } catch {
-            // Non-fatal if execution fails on mock code
+          } catch (execErr: any) {
+            console.error('Execution error:', execErr);
           }
         }
 
@@ -285,7 +303,7 @@ export const PlaygroundPage: React.FC<PlaygroundPageProps> = ({ onGoBack }) => {
   const hasResult = uiState === 'result' && (result !== null || executionResult !== null);
 
   // Line calculations for Left Panel code editor
-  const displayCode = mode === 'explain' ? code : (result?.solution_code || '');
+  const displayCode = code || (result?.solution_code || '');
   const editorLines = useMemo(() => {
     return displayCode ? displayCode.split('\n') : [''];
   }, [displayCode]);
@@ -486,121 +504,103 @@ export const PlaygroundPage: React.FC<PlaygroundPageProps> = ({ onGoBack }) => {
                 </div>
 
                 {/* Editor Body */}
-                <div className="p-3">
-                  {mode === 'explain' ? (
-                    /* Explain mode: Editable Code with synchronized Line Numbers & Active Line Highlight */
-                    <div className="relative rounded-xl overflow-hidden border border-black/[0.08] bg-[#141416] flex flex-col min-h-[440px]">
-                      {/* Top editor mini-bar */}
-                      <div className="flex items-center justify-between px-3.5 py-2 bg-[#1A1A1E] border-b border-white/[0.06]">
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-2.5 h-2.5 rounded-full bg-[#FF5F57]" />
-                          <div className="w-2.5 h-2.5 rounded-full bg-[#FEBC2E]" />
-                          <div className="w-2.5 h-2.5 rounded-full bg-[#28C840]" />
-                        </div>
-                        <span className="text-[11px] font-mono text-[#8A8A90] uppercase tracking-wider">
-                          {language}
-                        </span>
-                        {currentStep && currentStep.line_number > 0 && (
-                          <span className="text-[11px] font-mono font-bold text-[#3CC8FF] bg-[#3CC8FF]/10 px-2 py-0.5 rounded-md border border-[#3CC8FF]/20">
-                            Active: Line {currentStep.line_number}
+                <div className="p-3 space-y-3">
+                  {mode === 'solve' && (
+                    <div className="rounded-xl border border-black/[0.08] bg-[#FDFDFD] p-3 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-[#44444C]">Problem Statement</span>
+                        {result?.approach && (
+                          <span className="text-[11px] font-mono font-medium text-[#6C5CFF] bg-[#6C5CFF]/10 px-2 py-0.5 rounded-md">
+                            {result.approach}
                           </span>
                         )}
                       </div>
-
-                      {/* Code Area with Line Numbers */}
-                      <div className="flex flex-1 overflow-x-auto text-[13px] leading-6 font-mono py-2">
-                        {/* Line numbers gutter */}
-                        <div className="select-none px-2.5 text-right font-mono text-xs shrink-0 border-r border-white/[0.06]">
-                          {editorLines.map((_, i) => {
-                            const lineNo = i + 1;
-                            const isCurrent = currentStep?.line_number === lineNo;
-                            return (
-                              <div
-                                key={i}
-                                className={`h-6 flex items-center justify-end gap-1 px-1 rounded transition-colors ${
-                                  isCurrent
-                                    ? 'text-[#3CC8FF] font-bold bg-[#3CC8FF]/25'
-                                    : 'text-[#52525B]'
-                                }`}
-                              >
-                                {isCurrent && <span className="text-[10px] text-[#3CC8FF]">▶</span>}
-                                <span>{lineNo}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        {/* Interactive Code Textarea */}
-                        <div className="relative flex-1">
-                          {/* Active line background marker */}
-                          {currentStep && currentStep.line_number > 0 && (
-                            <div
-                              className="absolute left-0 right-0 pointer-events-none bg-[#6C5CFF]/15 border-l-2 border-[#3CC8FF] transition-all duration-150"
-                              style={{
-                                top: `${(currentStep.line_number - 1) * 24}px`,
-                                height: '24px',
-                              }}
-                            />
-                          )}
-                          <textarea
-                            ref={codeRef}
-                            value={code}
-                            onChange={(e) => {
-                              setCode(e.target.value);
-                              if (executionResult) {
-                                setExecutionResult(null);
-                                setSteps([]);
-                              }
-                            }}
-                            placeholder={'Paste or write your code here...\n\nTip: Load a preset above or write any algorithm to dry-run.'}
-                            spellCheck={false}
-                            data-cursor="input"
-                            className="w-full h-full min-h-[400px] resize-none bg-transparent font-mono text-[13px] text-[#E2E2E8] placeholder:text-[#6B6B73] leading-6 outline-none px-3 py-0 overflow-auto whitespace-pre"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    /* Solve mode: Problem description input or solution code display */
-                    <div className="space-y-3">
-                      <div className="rounded-xl border border-black/[0.08] bg-[#FDFDFD] p-3 space-y-1.5">
-                        <span className="text-xs font-semibold text-[#44444C]">Problem Statement</span>
-                        <textarea
-                          value={problem}
-                          onChange={(e) => setProblem(e.target.value)}
-                          placeholder={'Describe the problem you want to solve...\n\nExample: Given an array of integers and a target sum, find two indices whose values add up to the target.'}
-                          rows={4}
-                          className="w-full resize-none bg-transparent font-mono text-[13px] text-[#1F1F24] placeholder:text-[#A0A0A8] leading-relaxed outline-none"
-                        />
-                      </div>
-
-                      {result?.solution_code && (
-                        <div className="rounded-xl overflow-hidden border border-black/[0.08] bg-[#141416] p-3 space-y-2">
-                          <div className="flex items-center justify-between text-xs font-semibold text-[#E2E2E8]">
-                            <span>Generated Solution Code</span>
-                            {currentStep && currentStep.line_number > 0 && (
-                              <span className="font-mono text-[#3CC8FF]">Line {currentStep.line_number}</span>
-                            )}
-                          </div>
-                          <div className="flex overflow-x-auto text-[13px] leading-6 font-mono py-2 max-h-[340px]">
-                            <div className="select-none px-2.5 text-right font-mono text-xs shrink-0 border-r border-white/[0.06]">
-                              {editorLines.map((_, i) => (
-                                <div
-                                  key={i}
-                                  className={`h-6 ${currentStep?.line_number === i + 1 ? 'text-[#3CC8FF] font-bold bg-[#3CC8FF]/20' : 'text-[#52525B]'}`}
-                                >
-                                  {i + 1}
-                                </div>
-                              ))}
-                            </div>
-                            <pre className="flex-1 px-3 text-[#E2E2E8] whitespace-pre overflow-visible">
-                              {result.solution_code}
-                            </pre>
-                          </div>
-                        </div>
-                      )}
+                      <textarea
+                        value={problem}
+                        onChange={(e) => setProblem(e.target.value)}
+                        placeholder={'Describe the problem you want to solve...\n\nExample: Given an array of integers and a target sum, find two indices whose values add up to the target.'}
+                        rows={3}
+                        className="w-full resize-none bg-transparent font-mono text-[13px] text-[#1F1F24] placeholder:text-[#A0A0A8] leading-relaxed outline-none"
+                      />
                     </div>
                   )}
+
+                  {/* Synchronized Code Editor with Line Numbers & Active Line Highlight */}
+                  <div className="relative rounded-xl overflow-hidden border border-black/[0.08] bg-[#141416] flex flex-col min-h-[440px]">
+                    {/* Top editor mini-bar */}
+                    <div className="flex items-center justify-between px-3.5 py-2 bg-[#1A1A1E] border-b border-white/[0.06]">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-2.5 h-2.5 rounded-full bg-[#FF5F57]" />
+                        <div className="w-2.5 h-2.5 rounded-full bg-[#FEBC2E]" />
+                        <div className="w-2.5 h-2.5 rounded-full bg-[#28C840]" />
+                      </div>
+                      <span className="text-[11px] font-mono text-[#8A8A90] uppercase tracking-wider">
+                        {language}
+                      </span>
+                      {currentStep && currentStep.line_number > 0 && (
+                        <span className="text-[11px] font-mono font-bold text-[#3CC8FF] bg-[#3CC8FF]/10 px-2 py-0.5 rounded-md border border-[#3CC8FF]/20">
+                          Active: Line {currentStep.line_number}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Code Area with Line Numbers */}
+                    <div className="flex flex-1 overflow-x-auto text-[13px] leading-6 font-mono py-2">
+                      {/* Line numbers gutter */}
+                      <div className="select-none px-2.5 text-right font-mono text-xs shrink-0 border-r border-white/[0.06]">
+                        {editorLines.map((_, i) => {
+                          const lineNo = i + 1;
+                          const isCurrent = currentStep?.line_number === lineNo;
+                          return (
+                            <div
+                              key={i}
+                              className={`h-6 flex items-center justify-end gap-1 px-1 rounded transition-colors ${
+                                isCurrent
+                                  ? 'text-[#3CC8FF] font-bold bg-[#3CC8FF]/25'
+                                  : 'text-[#52525B]'
+                              }`}
+                            >
+                              {isCurrent && <span className="text-[10px] text-[#3CC8FF]">▶</span>}
+                              <span>{lineNo}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Interactive Code Textarea */}
+                      <div className="relative flex-1">
+                        {/* Active line background marker */}
+                        {currentStep && currentStep.line_number > 0 && (
+                          <div
+                            className="absolute left-0 right-0 pointer-events-none bg-[#6C5CFF]/15 border-l-2 border-[#3CC8FF] transition-all duration-150"
+                            style={{
+                              top: `${(currentStep.line_number - 1) * 24}px`,
+                              height: '24px',
+                            }}
+                          />
+                        )}
+                        <textarea
+                          ref={codeRef}
+                          value={displayCode}
+                          onChange={(e) => {
+                            setCode(e.target.value);
+                            if (executionResult) {
+                              setExecutionResult(null);
+                              setSteps([]);
+                            }
+                          }}
+                          placeholder={
+                            mode === 'explain'
+                              ? 'Paste or write your code here...\n\nTip: Load a preset above or write any algorithm to dry-run.'
+                              : 'Generated solution code will appear here after clicking Solve & Dry Run, or paste your code to customize.'
+                          }
+                          spellCheck={false}
+                          data-cursor="input"
+                          className="w-full h-full min-h-[400px] resize-none bg-transparent font-mono text-[13px] text-[#E2E2E8] placeholder:text-[#6B6B73] leading-6 outline-none px-3 py-0 overflow-auto whitespace-pre"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Left Panel Action Bar: Run / Reset Buttons */}
