@@ -5,6 +5,7 @@ import uuid
 from typing import List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
+from backend.app.core.language import languages_match, normalize_language
 from backend.app.models.problem import Problem
 from backend.app.models.solution import Solution
 from backend.app.repositories.problem_repository import ProblemRepository
@@ -112,11 +113,10 @@ class ProblemService:
         all_solutions = self.solution_repo.get_by_problem_id(db, matched_problem.id)
         available_languages = sorted(list({s.language for s in all_solutions}))
 
-        # Select solution for requested language if available
+        # Select solution for requested language if available (STRICT exact language match)
         selected_solution: Optional[SolutionItem] = None
-        if language:
-            target_lang = language.lower()
-            matching_sols = [s for s in all_solutions if s.language.lower() == target_lang]
+        if language and language.strip():
+            matching_sols = [s for s in all_solutions if languages_match(s.language, language)]
             if matching_sols:
                 selected_solution = self._to_solution_item(matching_sols[0])
 
@@ -187,6 +187,7 @@ class ProblemService:
         if not language or not language.strip():
             return []
 
-        solutions = self.solution_repo.get_by_problem_id(db, problem.id, language.strip())
-        return [self._to_solution_item(s) for s in solutions]
+        solutions = self.solution_repo.get_by_problem_id(db, problem.id)
+        matching_sols = [s for s in solutions if languages_match(s.language, language)]
+        return [self._to_solution_item(s) for s in matching_sols]
 

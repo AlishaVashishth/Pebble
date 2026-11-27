@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, MessageSquare } from 'lucide-react';
+import { Plus, MessageSquare, FlaskConical } from 'lucide-react';
 import { UserChip } from './UserChip.tsx';
 
 interface SidebarProps {
@@ -10,6 +10,7 @@ interface SidebarProps {
   onQuickStarter: (query: string) => void;
   onLogout: () => void;
   onLogoClick: () => void;
+  onOpenPlayground?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -20,6 +21,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onQuickStarter,
   onLogout,
   onLogoClick,
+  onOpenPlayground,
 }) => {
   return (
     <aside className="w-16 h-full border-r border-black/[0.06] bg-[#ECECEE]/90 flex flex-col items-center justify-between py-4 select-none shrink-0 z-20">
@@ -75,6 +77,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
           >
             <MessageSquare className="w-5 h-5 stroke-[1.75]" />
           </button>
+
+          {/* Playground shortcut */}
+          {onOpenPlayground && (
+            <button
+              type="button"
+              onClick={onOpenPlayground}
+              data-cursor="button"
+              title="Code Playground"
+              aria-label="Code Playground"
+              className="w-10 h-10 rounded-xl flex items-center justify-center transition-all cursor-pointer text-[#6B6B73] hover:text-[#111113] hover:bg-white/60"
+            >
+              <FlaskConical className="w-5 h-5 stroke-[1.75]" />
+            </button>
+          )}
         </div>
       </div>
 

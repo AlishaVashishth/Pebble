@@ -13,6 +13,7 @@ import { useAuthModal } from './hooks/useAuthModal.ts';
 import { AuthModal } from './components/Auth/AuthModal.tsx';
 import { useAppRoute } from './hooks/useAppRoute.ts';
 import { HomePage } from './components/Home/HomePage.tsx';
+import { PlaygroundPage } from './components/Playground/PlaygroundPage.tsx';
 import { getSavedSession, AuthUser } from './lib/auth.ts';
 
 export default function App() {
@@ -59,6 +60,10 @@ export default function App() {
     navigate('home');
   };
 
+  const handleOpenPlayground = () => {
+    navigate('playground');
+  };
+
   const handleLogout = () => {
     logout();
     setCurrentUser(null);
@@ -92,7 +97,19 @@ export default function App() {
             <HomePage
               onLogout={handleLogout}
               onGoToLanding={() => navigate('landing')}
+              onGoToPlayground={handleOpenPlayground}
             />
+          </motion.div>
+        ) : route === 'playground' ? (
+          <motion.div
+            key="playground-page-view"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+            className="fixed inset-0 z-30"
+          >
+            <PlaygroundPage onGoBack={() => navigate('home')} />
           </motion.div>
         ) : (
           <motion.div

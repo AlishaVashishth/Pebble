@@ -75,7 +75,7 @@ class Settings(BaseSettings):
 
     INTENT_PROVIDER: str = Field(
         default="off",
-        description="LLM intent classification provider ('off', 'mock', 'azure')",
+        description="LLM intent classification provider ('off', 'mock', 'azure', 'groq', 'gemini')",
     )
     AZURE_OPENAI_ENDPOINT: str = Field(
         default="",
@@ -104,6 +104,14 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = Field(
         default="llama-3.1-8b-instant",
         description="Groq model name",
+    )
+    GEMINI_API_KEY: str = Field(
+        default="",
+        description="Google Gemini API key",
+    )
+    GEMINI_MODEL: str = Field(
+        default="gemini-1.5-flash",
+        description="Gemini model name",
     )
 
     @field_validator("CORS_ORIGINS", mode="before")

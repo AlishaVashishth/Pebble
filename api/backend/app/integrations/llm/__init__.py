@@ -5,6 +5,7 @@ from typing import Optional
 from backend.app.config import get_settings
 from backend.app.integrations.llm.azure_openai import AzureOpenAIProvider
 from backend.app.integrations.llm.base import LLMProvider
+from backend.app.integrations.llm.gemini import GeminiProvider
 from backend.app.integrations.llm.groq import GroqProvider
 from backend.app.integrations.llm.mock import MockLLMProvider
 
@@ -46,12 +47,19 @@ def get_llm_provider() -> Optional[LLMProvider]:
             model=settings.GROQ_MODEL,
             timeout_seconds=settings.INTENT_TIMEOUT_SECONDS,
         )
+    elif provider_name == "gemini":
+        return GeminiProvider(
+            api_key=settings.GEMINI_API_KEY,
+            model=settings.GEMINI_MODEL,
+            timeout_seconds=settings.INTENT_TIMEOUT_SECONDS,
+        )
     return None
 
 
 __all__ = [
     "LLMProvider",
     "AzureOpenAIProvider",
+    "GeminiProvider",
     "GroqProvider",
     "MockLLMProvider",
     "get_llm_provider",
